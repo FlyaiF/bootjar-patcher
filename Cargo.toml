@@ -2,5 +2,6 @@
 members = [
     "crates/bootjar-core",
     "crates/bootjar-cli",
+    "crates/bootjar-spring-it",
 ]
 resolver = "2"

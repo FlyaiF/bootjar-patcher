@@ -33,3 +33,23 @@ Then rebuild the fat jar while preserving Spring Boot loader requirements.
 ## Key invariant
 
 Outer entries for `BOOT-INF/lib/*.jar` must be STORED/uncompressed in the executable jar. The nested jar contents themselves may remain compressed.
+
+## Real Spring Boot integration tests
+
+The default Rust test suite stays Java-free:
+
+```bash
+cargo test
+```
+
+The opt-in real Spring Boot suite builds a minimal executable jar with the Maven Wrapper and tests `bootjar-core` against that artifact:
+
+```bash
+cargo test -p bootjar-spring-it -- --ignored
+```
+
+Requirements for the opt-in suite:
+
+- Java 21 available on `PATH`
+- Network access on first run, unless Maven and dependencies are already cached
+- No system Maven installation; tests invoke `crates/bootjar-spring-it/fixture/mvnw`
