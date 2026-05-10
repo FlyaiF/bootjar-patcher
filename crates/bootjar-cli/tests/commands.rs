@@ -151,6 +151,10 @@ fn write_input_file(path: &std::path::Path, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
 }
 
+fn yaml_path(path: &std::path::Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "''"))
+}
+
 fn read_jar_entry(path: &std::path::Path, entry_name: &str) -> Vec<u8> {
     let file = std::fs::File::open(path).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -568,9 +572,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/classes/application.yml
-      with: "{}"
+      with: {}
 "#,
-            replacement.display()
+            yaml_path(&replacement)
         ),
     )
     .unwrap();
@@ -613,9 +617,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/lib/order.jar!/com/acme/OrderService.class
-      with: "{}"
+      with: {}
 "#,
-            replacement.display()
+            yaml_path(&replacement)
         ),
     )
     .unwrap();
@@ -663,9 +667,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/lib/order.jar
-      with: "{}"
+      with: {}
 "#,
-            replacement.display()
+            yaml_path(&replacement)
         ),
     )
     .unwrap();
@@ -740,9 +744,9 @@ version: 1
 operations:
   - replace-entry:
       target: WEB-INF/classes/application.yml
-      with: "{}"
+      with: {}
 "#,
-            replacement.display()
+            yaml_path(&replacement)
         ),
     )
     .unwrap();
@@ -781,9 +785,9 @@ version: 1
 operations:
   - replace-entry:
       target: WEB-INF/lib-provided/container.jar!/com/acme/ProvidedService.class
-      with: "{}"
+      with: {}
 "#,
-            replacement.display()
+            yaml_path(&replacement)
         ),
     )
     .unwrap();
@@ -832,13 +836,13 @@ version: 1
 operations:
   - replace-entry:
       target: config/runtime.yml
-      with: "{}"
+      with: {}
   - replace-entry:
       target: app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class
-      with: "{}"
+      with: {}
 "#,
-            config_replacement.display(),
-            class_replacement.display()
+            yaml_path(&config_replacement),
+            yaml_path(&class_replacement)
         ),
     )
     .unwrap();
@@ -925,9 +929,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/classes/application.yml
-      with: "{}"
+      with: {}
 "#,
-            replacement.display()
+            yaml_path(&replacement)
         ),
     )
     .unwrap();

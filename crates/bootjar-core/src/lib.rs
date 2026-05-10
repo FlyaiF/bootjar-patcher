@@ -1723,6 +1723,10 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    fn yaml_path(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "''"))
+    }
+
     fn read_jar_entry(path: &Path, entry_name: &str) -> Vec<u8> {
         let file = File::open(path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -2088,7 +2092,7 @@ mod tests {
         let wrapper_match = candidates
             .matches
             .iter()
-            .find(|input| input.input.ends_with("config/runtime.yml"))
+            .find(|input| normalize_entry_name(&input.input).ends_with("config/runtime.yml"))
             .unwrap();
         assert_eq!(wrapper_match.status, MatchStatus::Selected);
         assert_eq!(wrapper_match.candidates[0].target, "config/runtime.yml");
@@ -2097,8 +2101,7 @@ mod tests {
             .matches
             .iter()
             .find(|input| {
-                input
-                    .input
+                normalize_entry_name(&input.input)
                     .ends_with("app/service.jar!/BOOT-INF/classes/application.yml")
             })
             .unwrap();
@@ -2112,7 +2115,7 @@ mod tests {
             .matches
             .iter()
             .find(|input| {
-                input.input.ends_with("BOOT-INF/classes/application.yml")
+                normalize_entry_name(&input.input).ends_with("BOOT-INF/classes/application.yml")
                     && !input.input.contains("service.jar!")
             })
             .unwrap();
@@ -2174,7 +2177,9 @@ mod tests {
         let exact_match = candidates
             .matches
             .iter()
-            .find(|input| input.input.ends_with("WEB-INF/classes/application.yml"))
+            .find(|input| {
+                normalize_entry_name(&input.input).ends_with("WEB-INF/classes/application.yml")
+            })
             .unwrap();
         assert_eq!(exact_match.status, MatchStatus::Selected);
         assert_eq!(
@@ -2407,9 +2412,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/classes/application.yml
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -2447,9 +2452,9 @@ version: 1
 operations:
   - replace-entry:
       target: WEB-INF/classes/application.yml
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -2484,17 +2489,17 @@ version: 1
 operations:
   - replace-entry:
       target: config/runtime.yml
-      with: "{}"
+      with: {}
   - replace-entry:
       target: app/service.jar!/BOOT-INF/classes/application.yml
-      with: "{}"
+      with: {}
   - replace-entry:
       target: app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class
-      with: "{}"
+      with: {}
 "#,
-                config_replacement.display(),
-                app_replacement.display(),
-                class_replacement.display()
+                yaml_path(&config_replacement),
+                yaml_path(&app_replacement),
+                yaml_path(&class_replacement)
             ),
         )
         .unwrap();
@@ -2543,9 +2548,9 @@ version: 1
 operations:
   - replace-entry:
       target: bin/start.sh
-      with: "{}"
+      with: {}
 "#,
-                script_replacement.display()
+                yaml_path(&script_replacement)
             ),
         )
         .unwrap();
@@ -2592,9 +2597,9 @@ version: 1
 operations:
   - replace-entry:
       target: app/service.jar
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -2636,9 +2641,9 @@ version: 1
 operations:
   - replace-entry:
       target: app/service.jar
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -2669,9 +2674,9 @@ version: 1
 operations:
   - replace-entry:
       target: app/service.jar
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -2701,9 +2706,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/classes/application.yml
-      with: "{}"
+      with: {}
 "#,
-                missing.display()
+                yaml_path(&missing)
             ),
         )
         .unwrap();
@@ -2731,9 +2736,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/classes/missing.yml
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -2763,9 +2768,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/lib/order.jar!/com/acme/OrderService.class
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -2813,13 +2818,13 @@ version: 1
 operations:
   - replace-entry:
       target: WEB-INF/lib/order.jar!/com/acme/OrderService.class
-      with: "{}"
+      with: {}
   - replace-entry:
       target: WEB-INF/lib-provided/container.jar!/com/acme/ProvidedService.class
-      with: "{}"
+      with: {}
 "#,
-                lib_replacement.display(),
-                provided_replacement.display()
+                yaml_path(&lib_replacement),
+                yaml_path(&provided_replacement)
             ),
         )
         .unwrap();
@@ -2871,13 +2876,13 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/lib/order.jar!/com/acme/OrderService.class
-      with: "{}"
+      with: {}
   - replace-entry:
       target: BOOT-INF/lib/order.jar!/com/acme/config/order.yml
-      with: "{}"
+      with: {}
 "#,
-                class_replacement.display(),
-                config_replacement.display()
+                yaml_path(&class_replacement),
+                yaml_path(&config_replacement)
             ),
         )
         .unwrap();
@@ -2924,9 +2929,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/lib/order.jar
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -2973,9 +2978,9 @@ version: 1
 operations:
   - replace-entry:
       target: WEB-INF/lib-provided/container.jar
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -3009,9 +3014,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/lib/order.jar
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -3057,9 +3062,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/classes/application.yml
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -3225,9 +3230,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/lib/missing.jar!/com/acme/OrderService.class
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
@@ -3257,9 +3262,9 @@ version: 1
 operations:
   - replace-entry:
       target: BOOT-INF/lib/order.jar!/com/acme/Missing.class
-      with: "{}"
+      with: {}
 "#,
-                replacement.display()
+                yaml_path(&replacement)
             ),
         )
         .unwrap();
