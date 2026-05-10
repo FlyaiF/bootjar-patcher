@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 bootjar-core = { path = "../bootjar-core" }
+
+[dev-dependencies]
+tempfile = "3"
+zip = "0.6"

@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io;
+use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use zip::result::ZipError;
@@ -84,6 +84,10 @@ impl ArchivePath {
                     return Err(ArchivePathParseError::EmptyInnerPath);
                 }
                 let outer = parse_archive_component(outer, true)?;
+                let inner = inner.strip_prefix('/').unwrap_or(inner);
+                if inner.is_empty() {
+                    return Err(ArchivePathParseError::EmptyInnerPath);
+                }
                 let inner = parse_archive_component(inner, true)?;
                 Ok(Self::Nested {
                     outer_jar: outer,
@@ -182,12 +186,20 @@ pub struct NestedJarInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedJarEntry {
+    pub outer_jar: String,
+    pub inner_path: String,
+    pub archive_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JarIndex {
     pub entries: Vec<JarEntry>,
     pub has_boot_inf_classes: bool,
     pub has_boot_inf_lib: bool,
     pub has_boot_loader_entry: bool,
     pub nested_jars: Vec<NestedJarInfo>,
+    pub nested_entries: Vec<NestedJarEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +209,11 @@ pub struct InspectReport {
     pub has_boot_inf_lib: bool,
     pub has_boot_loader_entry: bool,
     pub nested_jars: Vec<NestedJarInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindResult {
+    pub archive_path: String,
 }
 
 pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectError> {
@@ -209,9 +226,10 @@ pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectE
     let mut has_boot_inf_lib = false;
     let mut has_boot_loader_entry = false;
     let mut nested_jars = Vec::new();
+    let mut nested_entries = Vec::new();
 
     for index in 0..archive.len() {
-        let entry = archive.by_index(index)?;
+        let mut entry = archive.by_index(index)?;
         let path = normalize_entry_name(entry.name());
         let is_dir = entry.is_dir();
 
@@ -239,11 +257,13 @@ pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectE
             has_boot_loader_entry = true;
         }
         if let Some(nested_name) = nested_jar_entry(&path) {
+            let nested_name = nested_name.to_string();
             nested_jars.push(NestedJarInfo {
-                path: nested_name.to_string(),
+                path: nested_name.clone(),
                 compression_method: compression.to_string(),
                 is_stored: compression == CompressionMethod::Stored,
             });
+            index_nested_jar_entries(&mut entry, &nested_name, &mut nested_entries);
         }
     }
 
@@ -253,6 +273,7 @@ pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectE
         has_boot_inf_lib,
         has_boot_loader_entry,
         nested_jars,
+        nested_entries,
     })
 }
 
@@ -266,11 +287,46 @@ impl JarIndex {
             nested_jars: self.nested_jars.clone(),
         }
     }
+
+    pub fn find(&self, query: &str) -> Vec<FindResult> {
+        let query = normalize_entry_name(query.trim());
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        for entry in &self.entries {
+            if path_matches_query(&entry.path, &query) {
+                results.push(FindResult {
+                    archive_path: entry.path.clone(),
+                });
+            }
+        }
+
+        for entry in &self.nested_entries {
+            if path_matches_query(&entry.archive_path, &query)
+                || path_matches_query(&entry.inner_path, &query)
+            {
+                results.push(FindResult {
+                    archive_path: entry.archive_path.clone(),
+                });
+            }
+        }
+
+        results
+    }
 }
 
 pub fn inspect_jar(path: impl AsRef<Path>) -> Result<InspectReport, JarInspectError> {
     let path_ref = path.as_ref();
     Ok(build_jar_index(path_ref)?.inspect_report(path_ref))
+}
+
+pub fn find_in_jar(
+    path: impl AsRef<Path>,
+    query: impl AsRef<str>,
+) -> Result<Vec<FindResult>, JarInspectError> {
+    Ok(build_jar_index(path.as_ref().to_path_buf())?.find(query.as_ref()))
 }
 
 fn normalize_entry_name(name: &str) -> String {
@@ -312,6 +368,48 @@ fn nested_jar_entry(path: &str) -> Option<&str> {
     Some(path)
 }
 
+fn index_nested_jar_entries<R: Read>(
+    nested_reader: &mut R,
+    outer_jar: &str,
+    nested_entries: &mut Vec<NestedJarEntry>,
+) {
+    let mut bytes = Vec::new();
+    if nested_reader.read_to_end(&mut bytes).is_err() {
+        return;
+    }
+
+    let cursor = Cursor::new(bytes);
+    let Ok(mut nested_archive) = zip::ZipArchive::new(cursor) else {
+        return;
+    };
+
+    for index in 0..nested_archive.len() {
+        let Ok(entry) = nested_archive.by_index(index) else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+
+        let inner_path = normalize_entry_name(entry.name());
+        nested_entries.push(NestedJarEntry {
+            outer_jar: outer_jar.to_string(),
+            archive_path: format!("{outer_jar}!/{inner_path}"),
+            inner_path,
+        });
+    }
+}
+
+fn path_matches_query(path: &str, query: &str) -> bool {
+    path.contains(query) || path_file_name(path).is_some_and(|file_name| file_name.contains(query))
+}
+
+fn path_file_name(path: &str) -> Option<&str> {
+    path.rsplit('/')
+        .next()
+        .filter(|file_name| !file_name.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +434,43 @@ mod tests {
         // Intentionally leak tempdir to keep path valid for returned fixture.
         std::mem::forget(dir);
         path
+    }
+
+    fn nested_jar_bytes(entries: &[(&str, CompressionMethod, &[u8])]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+
+        for (name, method, bytes) in entries {
+            let options = FileOptions::default().compression_method(*method);
+            zip.start_file(*name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn spring_boot_fixture_with_nested_entries() -> PathBuf {
+        let nested = nested_jar_bytes(&[
+            (
+                "com/acme/OrderService.class",
+                CompressionMethod::Deflated,
+                b"class-bytes",
+            ),
+            (
+                "com/acme/config/order.yml",
+                CompressionMethod::Stored,
+                b"enabled: true",
+            ),
+        ]);
+
+        write_jar(&[
+            (
+                "BOOT-INF/classes/application.yml",
+                CompressionMethod::Stored,
+                b"server.port: 8080",
+            ),
+            ("BOOT-INF/lib/order.jar", CompressionMethod::Stored, &nested),
+        ])
     }
 
     fn spring_boot_fixture() -> PathBuf {
@@ -388,6 +523,19 @@ mod tests {
 
     #[test]
     fn parses_nested_archive_paths() {
+        let path = ArchivePath::parse("BOOT-INF/lib/order-module.jar!/com/acme/OrderService.class")
+            .unwrap();
+        assert_eq!(
+            path,
+            ArchivePath::Nested {
+                outer_jar: "BOOT-INF/lib/order-module.jar".to_string(),
+                inner_path: "com/acme/OrderService.class".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_nested_archive_paths_without_slash_after_separator() {
         let path = ArchivePath::parse("BOOT-INF/lib/order-module.jar!com/acme/OrderService.class")
             .unwrap();
         assert_eq!(
@@ -473,6 +621,61 @@ mod tests {
             .expect("compressed.jar must be present");
         assert!(!compressed.is_stored);
         assert_eq!(compressed.compression_method, "Deflated");
+    }
+
+    #[test]
+    fn indexes_readable_nested_jar_entries() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let index = build_jar_index(&jar).unwrap();
+
+        assert_eq!(index.nested_entries.len(), 2);
+        assert!(index.nested_entries.iter().any(|entry| {
+            entry.archive_path == "BOOT-INF/lib/order.jar!/com/acme/OrderService.class"
+        }));
+        assert!(index.nested_entries.iter().any(|entry| {
+            entry.archive_path == "BOOT-INF/lib/order.jar!/com/acme/config/order.yml"
+        }));
+    }
+
+    #[test]
+    fn finds_nested_entries_by_filename() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let results = find_in_jar(&jar, "OrderService.class").unwrap();
+
+        assert_eq!(
+            results,
+            vec![FindResult {
+                archive_path: "BOOT-INF/lib/order.jar!/com/acme/OrderService.class".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn finds_outer_entries_by_path() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let results = find_in_jar(&jar, "BOOT-INF/classes/application.yml").unwrap();
+
+        assert_eq!(
+            results,
+            vec![FindResult {
+                archive_path: "BOOT-INF/classes/application.yml".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn find_returns_empty_results_for_no_match() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let results = find_in_jar(&jar, "Missing.class").unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn invalid_jars_fail_find() {
+        let jar = invalid_jar_fixture();
+        let err = find_in_jar(&jar, "OrderService.class").unwrap_err();
+        assert!(matches!(err, JarInspectError::InvalidJar(_)));
     }
 
     #[test]

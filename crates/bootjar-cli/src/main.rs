@@ -24,6 +24,28 @@ fn main() {
                 }
             }
         }
+        Some("find") => {
+            let path = args.next();
+            let query = args.next();
+            if path.is_none() || query.is_none() {
+                eprintln!("Usage: bootjar-patcher find <jar> <query>");
+                process::exit(2);
+            }
+            let path = Path::new(path.as_ref().unwrap());
+            let query = query.as_ref().unwrap();
+
+            match bootjar_core::find_in_jar(path, query) {
+                Ok(results) => {
+                    for result in results {
+                        println!("{}", result.archive_path);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("find failed: {err}");
+                    process::exit(1);
+                }
+            }
+        }
         Some("help") | Some("-h") | Some("--help") | None => {
             print_usage();
             if command.is_none() {
@@ -39,7 +61,9 @@ fn main() {
 }
 
 fn print_usage() {
-    eprintln!("Usage: bootjar-patcher inspect <jar>");
+    eprintln!("Usage:");
+    eprintln!("  bootjar-patcher inspect <jar>");
+    eprintln!("  bootjar-patcher find <jar> <query>");
 }
 
 fn print_inspect_report(report: &bootjar_core::InspectReport) {

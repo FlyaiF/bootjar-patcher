@@ -59,6 +59,8 @@ name = "bootjar-patcher"
 version = "0.1.0"
 dependencies = [
  "bootjar-core",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]
