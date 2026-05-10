@@ -47,3 +47,19 @@ Illegitimate reasons include:
 - Following up completed work with "would you like me to also do X, Y, Z?"
   —these are post-hoc confirmations. The user can say "no thanks," but the
   default is to have done them
+
+## Commit Messages
+
+All AI tools working in this repository must use
+`.git-templates/commit-message.txt` as the source of truth for commit messages.
+
+Commits should follow the template's structured format:
+
+- Subject: `<type>(<scope>): <short imperative summary>`
+- Body sections: `Why:`, `What changed:`, and `Notes / risks:`
+- Footer: only when relevant, such as `Fixes #123`, `Closes #456`, or
+  `BREAKING CHANGE: ...`
+
+Use one of the template's allowed types:
+`feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`,
+`chore`, or `revert`.
