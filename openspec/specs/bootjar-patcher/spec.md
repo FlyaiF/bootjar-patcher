@@ -182,6 +182,14 @@ The `match` command MUST include reason strings for each candidate.
 
 The `match` command MUST NOT silently convert ambiguous matches into final patch operations.
 
+The `match` command MUST emit a candidates YAML document by default.
+
+The `match` command MUST write the candidates YAML to `--out` when that option is provided.
+
+The `match` command MUST fail when the input jar cannot be opened.
+
+The `match` command MUST fail when an input path does not exist.
+
 #### Scenario: Ambiguous class filename
 
 Given an input file `OrderCalculator.class`
@@ -198,6 +206,29 @@ And the target jar contains `BOOT-INF/classes/application.yml`
 When the user runs `bootjar-patcher match --jar app.jar --inputs ./patch`
 Then the result may be marked `selected`
 And the selected target is `BOOT-INF/classes/application.yml`
+
+#### Scenario: No matching target
+
+Given an input file `Missing.class`
+And the target jar has no matching archive path or filename
+When the user runs `bootjar-patcher match --jar app.jar --inputs ./patch`
+Then the result for `Missing.class` is `no-match`
+And the result lists no candidate target paths
+
+#### Scenario: Write candidates YAML to file
+
+Given a target jar and an input file with candidate matches
+When the user runs `bootjar-patcher match --jar app.jar --inputs ./patch --out candidates.yaml`
+Then the command writes candidates YAML to `candidates.yaml`
+And the command does not write candidate YAML to standard output
+
+#### Scenario: Reject missing input path
+
+Given a target jar
+And the input path `./missing-patch-dir` does not exist
+When the user runs `bootjar-patcher match --jar app.jar --inputs ./missing-patch-dir`
+Then the command fails
+And the output explains that the input path could not be read
 
 ### Requirement: Emit copyable patch snippets
 

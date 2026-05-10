@@ -169,6 +169,31 @@ impl From<ZipError> for JarInspectError {
     }
 }
 
+#[derive(Debug)]
+pub enum MatchError {
+    Jar(JarInspectError),
+    InputPath { path: PathBuf, source: io::Error },
+}
+
+impl fmt::Display for MatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Jar(error) => write!(f, "{error}"),
+            Self::InputPath { path, source } => {
+                write!(f, "could not read input path {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for MatchError {}
+
+impl From<JarInspectError> for MatchError {
+    fn from(value: JarInspectError) -> Self {
+        Self::Jar(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JarEntry {
     pub path: String,
@@ -214,6 +239,50 @@ pub struct InspectReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindResult {
     pub archive_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateFile {
+    pub source: String,
+    pub matches: Vec<InputMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputMatch {
+    pub input: String,
+    pub status: MatchStatus,
+    pub candidates: Vec<CandidateTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchStatus {
+    Selected,
+    NeedsSelection,
+    NoMatch,
+}
+
+impl MatchStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Selected => "selected",
+            Self::NeedsSelection => "needs-selection",
+            Self::NoMatch => "no-match",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateTarget {
+    pub target: String,
+    pub score: u16,
+    pub reason: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputFile {
+    display_path: String,
+    relative_path: String,
+    file_name: String,
 }
 
 pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectError> {
@@ -329,8 +398,233 @@ pub fn find_in_jar(
     Ok(build_jar_index(path.as_ref().to_path_buf())?.find(query.as_ref()))
 }
 
+pub fn match_in_jar(
+    jar_path: impl AsRef<Path>,
+    input_roots: &[PathBuf],
+) -> Result<CandidateFile, MatchError> {
+    let jar_path = jar_path.as_ref();
+    let index = build_jar_index(jar_path.to_path_buf())?;
+    let inputs = collect_input_files(input_roots)?;
+    Ok(index.match_inputs(jar_path, &inputs))
+}
+
+impl CandidateFile {
+    pub fn to_yaml(&self) -> String {
+        let mut yaml = String::new();
+        yaml.push_str("kind: candidates\n");
+        yaml.push_str("version: 1\n");
+        yaml.push_str("source: ");
+        yaml.push_str(&yaml_string(&self.source));
+        yaml.push_str("\n\nmatches:\n");
+
+        if self.matches.is_empty() {
+            yaml.push_str("  []\n");
+            return yaml;
+        }
+
+        for input_match in &self.matches {
+            yaml.push_str("  - input: ");
+            yaml.push_str(&yaml_string(&input_match.input));
+            yaml.push('\n');
+            yaml.push_str("    status: ");
+            yaml.push_str(input_match.status.as_str());
+            yaml.push('\n');
+            yaml.push_str("    candidates:\n");
+            if input_match.candidates.is_empty() {
+                yaml.push_str("      []\n");
+                continue;
+            }
+
+            for candidate in &input_match.candidates {
+                yaml.push_str("      - target: ");
+                yaml.push_str(&yaml_string(&candidate.target));
+                yaml.push('\n');
+                yaml.push_str("        score: ");
+                yaml.push_str(&candidate.score.to_string());
+                yaml.push('\n');
+                yaml.push_str("        reason:\n");
+                for reason in &candidate.reason {
+                    yaml.push_str("          - ");
+                    yaml.push_str(&yaml_string(reason));
+                    yaml.push('\n');
+                }
+            }
+        }
+
+        yaml
+    }
+}
+
+impl JarIndex {
+    fn match_inputs(&self, jar_path: &Path, inputs: &[InputFile]) -> CandidateFile {
+        let targets = self.match_targets();
+        let matches = inputs
+            .iter()
+            .map(|input| match_input(input, &targets))
+            .collect();
+
+        CandidateFile {
+            source: jar_path.display().to_string(),
+            matches,
+        }
+    }
+
+    fn match_targets(&self) -> Vec<MatchTarget> {
+        let outer_targets = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.path.ends_with('/'))
+            .map(|entry| MatchTarget::new(entry.path.clone()));
+        let nested_targets = self
+            .nested_entries
+            .iter()
+            .map(|entry| MatchTarget::new(entry.archive_path.clone()));
+
+        outer_targets.chain(nested_targets).collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MatchTarget {
+    archive_path: String,
+    file_name: String,
+}
+
+impl MatchTarget {
+    fn new(archive_path: String) -> Self {
+        let file_name = path_file_name(&archive_path).unwrap_or("").to_string();
+        Self {
+            archive_path,
+            file_name,
+        }
+    }
+}
+
 fn normalize_entry_name(name: &str) -> String {
     name.replace('\\', "/")
+}
+
+fn collect_input_files(input_roots: &[PathBuf]) -> Result<Vec<InputFile>, MatchError> {
+    let mut files = Vec::new();
+    for root in input_roots {
+        collect_input_root(root, root, &mut files)?;
+    }
+    files.sort_by(|left, right| left.display_path.cmp(&right.display_path));
+    Ok(files)
+}
+
+fn collect_input_root(
+    base: &Path,
+    current: &Path,
+    files: &mut Vec<InputFile>,
+) -> Result<(), MatchError> {
+    let metadata = std::fs::metadata(current).map_err(|source| MatchError::InputPath {
+        path: current.to_path_buf(),
+        source,
+    })?;
+
+    if metadata.is_file() {
+        push_input_file(base, current, files);
+        return Ok(());
+    }
+
+    let entries = std::fs::read_dir(current).map_err(|source| MatchError::InputPath {
+        path: current.to_path_buf(),
+        source,
+    })?;
+
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| MatchError::InputPath {
+            path: current.to_path_buf(),
+            source,
+        })?;
+        paths.push(entry.path());
+    }
+    paths.sort();
+
+    for path in paths {
+        let metadata = std::fs::metadata(&path).map_err(|source| MatchError::InputPath {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.is_dir() {
+            collect_input_root(base, &path, files)?;
+        } else if metadata.is_file() {
+            push_input_file(base, &path, files);
+        }
+    }
+
+    Ok(())
+}
+
+fn push_input_file(root: &Path, path: &Path, files: &mut Vec<InputFile>) {
+    let relative = if root == path {
+        path.file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.strip_prefix(root).unwrap_or(path).to_path_buf()
+    };
+    let relative_path = normalize_entry_name(&relative.to_string_lossy());
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| relative_path.clone());
+
+    files.push(InputFile {
+        display_path: path.display().to_string(),
+        relative_path,
+        file_name,
+    });
+}
+
+fn match_input(input: &InputFile, targets: &[MatchTarget]) -> InputMatch {
+    let mut candidates = Vec::new();
+
+    for target in targets {
+        if target.archive_path == input.relative_path {
+            candidates.push(CandidateTarget {
+                target: target.archive_path.clone(),
+                score: 100,
+                reason: vec!["exact relative path".to_string()],
+            });
+        }
+    }
+
+    let exact_count = candidates.len();
+    for target in targets {
+        if target.file_name == input.file_name
+            && !candidates
+                .iter()
+                .any(|candidate| candidate.target == target.archive_path)
+        {
+            candidates.push(CandidateTarget {
+                target: target.archive_path.clone(),
+                score: 80,
+                reason: vec!["same filename".to_string()],
+            });
+        }
+    }
+
+    let status = if exact_count == 1 {
+        MatchStatus::Selected
+    } else if candidates.is_empty() {
+        MatchStatus::NoMatch
+    } else {
+        MatchStatus::NeedsSelection
+    };
+
+    InputMatch {
+        input: input.display_path.clone(),
+        status,
+        candidates,
+    }
+}
+
+fn yaml_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn is_boot_inf_classes_entry(path: &str) -> bool {
@@ -510,6 +804,13 @@ mod tests {
         path
     }
 
+    fn write_input_file(path: &Path, bytes: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn parses_outer_archive_paths() {
         let path = ArchivePath::parse("BOOT-INF/lib/order-module.jar").unwrap();
@@ -676,6 +977,128 @@ mod tests {
         let jar = invalid_jar_fixture();
         let err = find_in_jar(&jar, "OrderService.class").unwrap_err();
         assert!(matches!(err, JarInspectError::InvalidJar(_)));
+    }
+
+    #[test]
+    fn match_selects_unique_exact_relative_path() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("BOOT-INF/classes/application.yml");
+        write_input_file(&input, b"server.port: 9090");
+
+        let candidates = match_in_jar(&jar, &[dir.path().to_path_buf()]).unwrap();
+
+        assert_eq!(candidates.matches.len(), 1);
+        assert_eq!(candidates.matches[0].status, MatchStatus::Selected);
+        assert_eq!(candidates.matches[0].candidates.len(), 1);
+        assert_eq!(
+            candidates.matches[0].candidates[0].target,
+            "BOOT-INF/classes/application.yml"
+        );
+        assert_eq!(
+            candidates.matches[0].candidates[0].reason,
+            vec!["exact relative path".to_string()]
+        );
+    }
+
+    #[test]
+    fn match_marks_ambiguous_filename_matches_for_selection() {
+        let nested = nested_jar_bytes(&[(
+            "com/acme/OrderCalculator.class",
+            CompressionMethod::Stored,
+            b"nested",
+        )]);
+        let jar = write_jar(&[
+            (
+                "BOOT-INF/classes/com/acme/OrderCalculator.class",
+                CompressionMethod::Stored,
+                b"outer",
+            ),
+            ("BOOT-INF/lib/order.jar", CompressionMethod::Stored, &nested),
+        ]);
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("OrderCalculator.class");
+        write_input_file(&input, b"replacement");
+
+        let candidates = match_in_jar(&jar, &[dir.path().to_path_buf()]).unwrap();
+
+        assert_eq!(candidates.matches.len(), 1);
+        assert_eq!(candidates.matches[0].status, MatchStatus::NeedsSelection);
+        let targets: Vec<&str> = candidates.matches[0]
+            .candidates
+            .iter()
+            .map(|candidate| candidate.target.as_str())
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                "BOOT-INF/classes/com/acme/OrderCalculator.class",
+                "BOOT-INF/lib/order.jar!/com/acme/OrderCalculator.class",
+            ]
+        );
+        assert!(candidates.matches[0]
+            .candidates
+            .iter()
+            .all(|candidate| { candidate.reason == vec!["same filename".to_string()] }));
+    }
+
+    #[test]
+    fn match_records_no_match_results() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("Missing.class");
+        write_input_file(&input, b"replacement");
+
+        let candidates = match_in_jar(&jar, &[dir.path().to_path_buf()]).unwrap();
+
+        assert_eq!(candidates.matches.len(), 1);
+        assert_eq!(candidates.matches[0].status, MatchStatus::NoMatch);
+        assert!(candidates.matches[0].candidates.is_empty());
+    }
+
+    #[test]
+    fn match_fails_for_missing_input_path() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing");
+
+        let err = match_in_jar(&jar, &[missing.clone()]).unwrap_err();
+
+        assert!(matches!(err, MatchError::InputPath { path, .. } if path == missing));
+    }
+
+    #[test]
+    fn renders_candidates_yaml() {
+        let candidates = CandidateFile {
+            source: "app.jar".to_string(),
+            matches: vec![InputMatch {
+                input: "./patch/application.yml".to_string(),
+                status: MatchStatus::Selected,
+                candidates: vec![CandidateTarget {
+                    target: "BOOT-INF/classes/application.yml".to_string(),
+                    score: 100,
+                    reason: vec!["exact relative path".to_string()],
+                }],
+            }],
+        };
+
+        assert_eq!(
+            candidates.to_yaml(),
+            concat!(
+                "kind: candidates\n",
+                "version: 1\n",
+                "source: \"app.jar\"\n",
+                "\n",
+                "matches:\n",
+                "  - input: \"./patch/application.yml\"\n",
+                "    status: selected\n",
+                "    candidates:\n",
+                "      - target: \"BOOT-INF/classes/application.yml\"\n",
+                "        score: 100\n",
+                "        reason:\n",
+                "          - \"exact relative path\"\n",
+            )
+        );
     }
 
     #[test]

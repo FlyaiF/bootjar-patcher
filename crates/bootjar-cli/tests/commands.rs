@@ -77,6 +77,13 @@ fn invalid_jar() -> PathBuf {
     path
 }
 
+fn write_input_file(path: &std::path::Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
 #[test]
 fn inspect_reports_spring_boot_layout() {
     let jar = spring_boot_jar();
@@ -157,4 +164,73 @@ fn find_fails_for_invalid_jar() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("find failed: jar is not readable"));
+}
+
+#[test]
+fn match_prints_candidates_yaml_to_stdout() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    write_input_file(
+        &dir.path().join("BOOT-INF/classes/application.yml"),
+        b"server.port: 9090",
+    );
+
+    let output = command(&[
+        "match",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--inputs",
+        dir.path().to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("kind: candidates\n"));
+    assert!(stdout.contains("status: selected\n"));
+    assert!(stdout.contains("target: \"BOOT-INF/classes/application.yml\""));
+    assert!(stdout.contains("- \"exact relative path\""));
+}
+
+#[test]
+fn match_writes_candidates_yaml_to_out_file() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    write_input_file(&dir.path().join("Missing.class"), b"replacement");
+    let out = dir.path().join("candidates.yaml");
+
+    let output = command(&[
+        "match",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--inputs",
+        dir.path().to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    let yaml = std::fs::read_to_string(out).unwrap();
+    assert!(yaml.contains("kind: candidates\n"));
+    assert!(yaml.contains("status: no-match\n"));
+    assert!(yaml.contains("candidates:\n      []\n"));
+}
+
+#[test]
+fn match_fails_for_missing_input_path() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    let missing = dir.path().join("missing-patch-dir");
+
+    let output = command(&[
+        "match",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--inputs",
+        missing.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("match failed: could not read input path"));
 }
