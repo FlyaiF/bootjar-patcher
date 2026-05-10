@@ -1,6 +1,6 @@
 # bootjar-patcher OpenSpec Starter
 
-This archive initializes a spec-driven project for `bootjar-patcher`: a cross-platform CLI plus reusable Rust core library for inspecting, discovering, planning, and applying patches to Spring Boot executable fat jars.
+This archive initializes a spec-driven project for `bootjar-patcher`: a cross-platform CLI plus reusable Rust core library for inspecting, discovering, planning, and applying patches to Spring Boot executable JAR and WAR archives.
 
 ## Why this structure
 
@@ -14,13 +14,15 @@ Detailed behavior lives in:
 
 ## Project goal
 
-Patch files at any supported level of a Spring Boot executable jar:
+Patch files at any supported level of a Spring Boot executable archive:
 
 - `BOOT-INF/classes/...`
 - whole nested jars under `BOOT-INF/lib/*.jar`
 - files inside nested jars using `!` syntax, e.g. `BOOT-INF/lib/a.jar!/com/acme/Foo.class`
+- `WEB-INF/classes/...` in executable WARs
+- nested WAR libraries under `WEB-INF/lib/*.jar` and `WEB-INF/lib-provided/*.jar`
 
-Then rebuild the fat jar while preserving Spring Boot loader requirements.
+Then rebuild the archive while preserving Spring Boot loader requirements.
 
 ## Suggested next steps
 
@@ -32,7 +34,12 @@ Then rebuild the fat jar while preserving Spring Boot loader requirements.
 
 ## Key invariant
 
-Outer entries for `BOOT-INF/lib/*.jar` must be STORED/uncompressed in the executable jar. The nested jar contents themselves may remain compressed.
+Outer entries for Spring Boot nested libraries must be STORED/uncompressed in the executable archive:
+
+- `BOOT-INF/lib/*.jar` for executable JARs
+- `WEB-INF/lib/*.jar` and `WEB-INF/lib-provided/*.jar` for executable WARs
+
+The nested jar contents themselves may remain compressed.
 
 ## Real Spring Boot integration tests
 
@@ -42,7 +49,7 @@ The default Rust test suite stays Java-free:
 cargo test
 ```
 
-The opt-in real Spring Boot suite builds a minimal executable jar with the Maven Wrapper and tests `bootjar-core` against that artifact:
+The opt-in real Spring Boot suite builds minimal executable JAR and WAR artifacts with the Maven Wrapper and tests `bootjar-core` against those artifacts:
 
 ```bash
 cargo test -p bootjar-spring-it -- --ignored

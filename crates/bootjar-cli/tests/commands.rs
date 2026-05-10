@@ -65,6 +65,38 @@ fn spring_boot_jar() -> PathBuf {
     ])
 }
 
+fn spring_boot_war() -> PathBuf {
+    let nested = nested_jar_bytes(&[(
+        "com/acme/OrderService.class",
+        CompressionMethod::Deflated,
+        b"class-bytes",
+    )]);
+    let provided = nested_jar_bytes(&[(
+        "com/acme/ProvidedService.class",
+        CompressionMethod::Deflated,
+        b"provided-class-bytes",
+    )]);
+
+    write_jar(&[
+        (
+            "WEB-INF/classes/application.yml",
+            CompressionMethod::Stored,
+            b"server.port: 8080",
+        ),
+        ("WEB-INF/lib/order.jar", CompressionMethod::Stored, &nested),
+        (
+            "WEB-INF/lib-provided/container.jar",
+            CompressionMethod::Stored,
+            &provided,
+        ),
+        (
+            "org/springframework/boot/loader/launch/WarLauncher.class",
+            CompressionMethod::Stored,
+            b"boot-loader",
+        ),
+    ])
+}
+
 fn non_spring_jar() -> PathBuf {
     write_jar(&[("com/example/App.class", CompressionMethod::Stored, b"")])
 }
@@ -117,10 +149,26 @@ fn inspect_reports_spring_boot_layout() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Layout: Spring Boot JAR"));
     assert!(stdout.contains("BOOT-INF/classes: present"));
     assert!(stdout.contains("BOOT-INF/lib: present"));
     assert!(stdout.contains("Spring Boot launcher entries: present"));
     assert!(stdout.contains("BOOT-INF/lib/order.jar -> STORED (Stored)"));
+}
+
+#[test]
+fn inspect_reports_spring_boot_war_layout() {
+    let war = spring_boot_war();
+    let output = command(&["inspect", war.to_str().unwrap()]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Layout: Spring Boot WAR"));
+    assert!(stdout.contains("WEB-INF/classes: present"));
+    assert!(stdout.contains("WEB-INF/lib: present"));
+    assert!(stdout.contains("WEB-INF/lib-provided: present"));
+    assert!(stdout.contains("WEB-INF/lib/order.jar -> STORED (Stored)"));
+    assert!(stdout.contains("WEB-INF/lib-provided/container.jar -> STORED (Stored)"));
 }
 
 #[test]
@@ -203,7 +251,7 @@ fn match_prints_candidates_yaml_to_stdout() {
 
     let output = command(&[
         "match",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--inputs",
         dir.path().to_str().unwrap(),
@@ -226,7 +274,7 @@ fn match_writes_candidates_yaml_to_out_file() {
 
     let output = command(&[
         "match",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--inputs",
         dir.path().to_str().unwrap(),
@@ -250,7 +298,7 @@ fn match_fails_for_missing_input_path() {
 
     let output = command(&[
         "match",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--inputs",
         missing.to_str().unwrap(),
@@ -272,7 +320,7 @@ fn match_prints_snippets_to_stdout() {
 
     let output = command(&[
         "match",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--inputs",
         dir.path().to_str().unwrap(),
@@ -300,7 +348,7 @@ fn match_writes_snippets_to_out_file() {
 
     let output = command(&[
         "match",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--inputs",
         dir.path().to_str().unwrap(),
@@ -325,7 +373,7 @@ fn match_rejects_unknown_format() {
 
     let output = command(&[
         "match",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--inputs",
         dir.path().to_str().unwrap(),
@@ -336,6 +384,25 @@ fn match_rejects_unknown_format() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("unknown match format: xml"));
+}
+
+#[test]
+fn match_rejects_legacy_jar_option() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    write_input_file(&dir.path().join("Missing.class"), b"replacement");
+
+    let output = command(&[
+        "match",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--inputs",
+        dir.path().to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unknown match option: --jar"));
 }
 
 #[test]
@@ -364,7 +431,7 @@ operations:
 
     let output = command(&[
         "apply",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--plan",
         plan.to_str().unwrap(),
@@ -409,7 +476,7 @@ operations:
 
     let output = command(&[
         "apply",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--plan",
         plan.to_str().unwrap(),
@@ -459,7 +526,7 @@ operations:
 
     let output = command(&[
         "apply",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--plan",
         plan.to_str().unwrap(),
@@ -496,7 +563,7 @@ matches: []
 
     let output = command(&[
         "apply",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--plan",
         plan.to_str().unwrap(),
@@ -508,6 +575,119 @@ matches: []
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("apply failed: candidates files are not reviewed patch plans"));
     assert!(!output_jar.exists());
+}
+
+#[test]
+fn apply_replaces_war_outer_entry() {
+    let war = spring_boot_war();
+    let dir = tempdir().unwrap();
+    let replacement = dir.path().join("application.yml");
+    let plan = dir.path().join("patch-plan.yaml");
+    let output_war = dir.path().join("app-patched.war");
+    write_input_file(&replacement, b"server.port: 9090");
+    std::fs::write(
+        &plan,
+        format!(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: WEB-INF/classes/application.yml
+      with: "{}"
+"#,
+            replacement.display()
+        ),
+    )
+    .unwrap();
+
+    let output = command(&[
+        "apply",
+        "--archive",
+        war.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--out",
+        output_war.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        read_jar_entry(&output_war, "WEB-INF/classes/application.yml"),
+        b"server.port: 9090"
+    );
+}
+
+#[test]
+fn apply_replaces_war_nested_entry() {
+    let war = spring_boot_war();
+    let dir = tempdir().unwrap();
+    let replacement = dir.path().join("ProvidedService.class");
+    let plan = dir.path().join("patch-plan.yaml");
+    let output_war = dir.path().join("app-patched.war");
+    write_input_file(&replacement, b"patched-provided-class");
+    std::fs::write(
+        &plan,
+        format!(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: WEB-INF/lib-provided/container.jar!/com/acme/ProvidedService.class
+      with: "{}"
+"#,
+            replacement.display()
+        ),
+    )
+    .unwrap();
+
+    let output = command(&[
+        "apply",
+        "--archive",
+        war.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--out",
+        output_war.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        read_nested_jar_entry(
+            &output_war,
+            "WEB-INF/lib-provided/container.jar",
+            "com/acme/ProvidedService.class"
+        ),
+        b"patched-provided-class"
+    );
+    assert_eq!(
+        jar_entry_compression(&output_war, "WEB-INF/lib-provided/container.jar"),
+        CompressionMethod::Stored
+    );
+}
+
+#[test]
+fn apply_rejects_legacy_jar_option() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    let plan = dir.path().join("patch-plan.yaml");
+    let output_jar = dir.path().join("app-patched.jar");
+    std::fs::write(&plan, "kind: patch-plan\nversion: 1\noperations: []\n").unwrap();
+
+    let output = command(&[
+        "apply",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--out",
+        output_jar.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unknown apply option: --jar"));
 }
 
 #[test]
@@ -552,7 +732,7 @@ operations:
 
     let output = command(&[
         "apply",
-        "--jar",
+        "--archive",
         jar.to_str().unwrap(),
         "--plan",
         plan.to_str().unwrap(),
@@ -605,5 +785,33 @@ fn verify_fails_for_compressed_nested_jar() {
     assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("BOOT-INF/lib/order.jar -> not STORED (Deflated)"));
+    assert!(stdout.contains("Nested jar storage: failed"));
+}
+
+#[test]
+fn verify_fails_for_compressed_war_nested_jar() {
+    let nested = nested_jar_bytes(&[(
+        "com/acme/OrderService.class",
+        CompressionMethod::Stored,
+        b"",
+    )]);
+    let war = write_jar(&[
+        (
+            "WEB-INF/classes/application.yml",
+            CompressionMethod::Stored,
+            b"server.port: 8080",
+        ),
+        (
+            "WEB-INF/lib/order.jar",
+            CompressionMethod::Deflated,
+            &nested,
+        ),
+    ]);
+
+    let output = command(&["verify", war.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("WEB-INF/lib/order.jar -> not STORED (Deflated)"));
     assert!(stdout.contains("Nested jar storage: failed"));
 }

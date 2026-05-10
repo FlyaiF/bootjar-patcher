@@ -40,7 +40,7 @@ impl fmt::Display for ArchivePathParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyInput => write!(f, "archive path is empty"),
-            Self::EmptyOuterPath => write!(f, "outer jar path is empty"),
+            Self::EmptyOuterPath => write!(f, "outer archive path is empty"),
             Self::EmptyInnerPath => write!(f, "nested inner path is empty"),
             Self::MultipleNestedSeparators => {
                 write!(f, "archive path contains multiple `!` separators")
@@ -272,10 +272,16 @@ impl fmt::Display for ApplyError {
                 )
             }
             Self::MissingTarget(target) => {
-                write!(f, "replace target does not exist in input jar: {target}")
+                write!(
+                    f,
+                    "replace target does not exist in input archive: {target}"
+                )
             }
             Self::MissingNestedJar(target) => {
-                write!(f, "nested jar target does not exist in input jar: {target}")
+                write!(
+                    f,
+                    "nested jar target does not exist in input archive: {target}"
+                )
             }
             Self::MissingNestedTarget {
                 outer_jar,
@@ -360,11 +366,22 @@ pub struct NestedJarEntry {
     pub archive_path: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveLayout {
+    SpringBootJar,
+    SpringBootWar,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JarIndex {
     pub entries: Vec<JarEntry>,
+    pub layout: ArchiveLayout,
     pub has_boot_inf_classes: bool,
     pub has_boot_inf_lib: bool,
+    pub has_web_inf_classes: bool,
+    pub has_web_inf_lib: bool,
+    pub has_web_inf_lib_provided: bool,
     pub has_boot_loader_entry: bool,
     pub nested_jars: Vec<NestedJarInfo>,
     pub nested_entries: Vec<NestedJarEntry>,
@@ -373,8 +390,12 @@ pub struct JarIndex {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectReport {
     pub jar_path: String,
+    pub layout: ArchiveLayout,
     pub has_boot_inf_classes: bool,
     pub has_boot_inf_lib: bool,
+    pub has_web_inf_classes: bool,
+    pub has_web_inf_lib: bool,
+    pub has_web_inf_lib_provided: bool,
     pub has_boot_loader_entry: bool,
     pub nested_jars: Vec<NestedJarInfo>,
 }
@@ -504,6 +525,9 @@ pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectE
     let mut entries = Vec::with_capacity(archive.len());
     let mut has_boot_inf_classes = false;
     let mut has_boot_inf_lib = false;
+    let mut has_web_inf_classes = false;
+    let mut has_web_inf_lib = false;
+    let mut has_web_inf_lib_provided = false;
     let mut has_boot_loader_entry = false;
     let mut nested_jars = Vec::new();
     let mut nested_entries = Vec::new();
@@ -533,10 +557,19 @@ pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectE
         if is_boot_inf_lib_entry(&path) {
             has_boot_inf_lib = true;
         }
+        if is_web_inf_classes_entry(&path) {
+            has_web_inf_classes = true;
+        }
+        if is_web_inf_lib_entry(&path) {
+            has_web_inf_lib = true;
+        }
+        if is_web_inf_lib_provided_entry(&path) {
+            has_web_inf_lib_provided = true;
+        }
         if is_boot_loader_entry(&path) {
             has_boot_loader_entry = true;
         }
-        if let Some(nested_name) = nested_jar_entry(&path) {
+        if let Some(nested_name) = nested_library_entry(&path) {
             let nested_name = nested_name.to_string();
             nested_jars.push(NestedJarInfo {
                 path: nested_name.clone(),
@@ -547,10 +580,22 @@ pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectE
         }
     }
 
-    Ok(JarIndex {
-        entries,
+    let layout = detect_archive_layout(
         has_boot_inf_classes,
         has_boot_inf_lib,
+        has_web_inf_classes,
+        has_web_inf_lib,
+        has_web_inf_lib_provided,
+    );
+
+    Ok(JarIndex {
+        entries,
+        layout,
+        has_boot_inf_classes,
+        has_boot_inf_lib,
+        has_web_inf_classes,
+        has_web_inf_lib,
+        has_web_inf_lib_provided,
         has_boot_loader_entry,
         nested_jars,
         nested_entries,
@@ -561,8 +606,12 @@ impl JarIndex {
     pub fn inspect_report(&self, path: &Path) -> InspectReport {
         InspectReport {
             jar_path: path.display().to_string(),
+            layout: self.layout,
             has_boot_inf_classes: self.has_boot_inf_classes,
             has_boot_inf_lib: self.has_boot_inf_lib,
+            has_web_inf_classes: self.has_web_inf_classes,
+            has_web_inf_lib: self.has_web_inf_lib,
+            has_web_inf_lib_provided: self.has_web_inf_lib_provided,
             has_boot_loader_entry: self.has_boot_loader_entry,
             nested_jars: self.nested_jars.clone(),
         }
@@ -1009,7 +1058,7 @@ fn rewrite_outer_jar_with_replacements(
 ) -> Result<(), ApplyError> {
     let input = File::open(input_jar).map_err(|source| ApplyError::Io {
         path: input_jar.to_path_buf(),
-        action: "read input jar",
+        action: "read input archive",
         source,
     })?;
     let mut archive = zip::ZipArchive::new(input)?;
@@ -1028,7 +1077,7 @@ fn rewrite_outer_jar_with_replacements(
 
     let output = File::create(output_jar).map_err(|source| ApplyError::Io {
         path: output_jar.to_path_buf(),
-        action: "write output jar",
+        action: "write output archive",
         source,
     })?;
     let mut writer = zip::ZipWriter::new(output);
@@ -1059,14 +1108,14 @@ fn rewrite_outer_jar_with_replacements(
                 .write_all(&replacement.bytes)
                 .map_err(|source| ApplyError::Io {
                     path: output_jar.to_path_buf(),
-                    action: "write output jar",
+                    action: "write output archive",
                     source,
                 })?;
         } else {
             writer.start_file(&path, options)?;
             io::copy(&mut entry, &mut writer).map_err(|source| ApplyError::Io {
                 path: output_jar.to_path_buf(),
-                action: "write output jar",
+                action: "write output archive",
                 source,
             })?;
         }
@@ -1087,7 +1136,7 @@ fn rewrite_outer_jar_with_plan(
     for replacement in resolved {
         match replacement.target {
             ArchivePath::Outer { path } => {
-                let compression_method = if nested_jar_entry(&path).is_some() {
+                let compression_method = if nested_library_entry(&path).is_some() {
                     validate_replacement_nested_jar(&replacement.source, &replacement.bytes)?;
                     Some(CompressionMethod::Stored)
                 } else {
@@ -1116,7 +1165,7 @@ fn rewrite_outer_jar_with_plan(
     if !nested_replacements.is_empty() {
         let input = File::open(input_jar).map_err(|source| ApplyError::Io {
             path: input_jar.to_path_buf(),
-            action: "read input jar",
+            action: "read input archive",
             source,
         })?;
         let mut archive = zip::ZipArchive::new(input)?;
@@ -1258,19 +1307,47 @@ fn is_boot_inf_lib_entry(path: &str) -> bool {
     path == "BOOT-INF/lib" || path == "BOOT-INF/lib/" || path.starts_with("BOOT-INF/lib/")
 }
 
+fn is_web_inf_classes_entry(path: &str) -> bool {
+    path == "WEB-INF/classes" || path == "WEB-INF/classes/" || path.starts_with("WEB-INF/classes/")
+}
+
+fn is_web_inf_lib_entry(path: &str) -> bool {
+    path == "WEB-INF/lib" || path == "WEB-INF/lib/" || path.starts_with("WEB-INF/lib/")
+}
+
+fn is_web_inf_lib_provided_entry(path: &str) -> bool {
+    path == "WEB-INF/lib-provided"
+        || path == "WEB-INF/lib-provided/"
+        || path.starts_with("WEB-INF/lib-provided/")
+}
+
+fn detect_archive_layout(
+    has_boot_inf_classes: bool,
+    has_boot_inf_lib: bool,
+    has_web_inf_classes: bool,
+    has_web_inf_lib: bool,
+    has_web_inf_lib_provided: bool,
+) -> ArchiveLayout {
+    if has_web_inf_classes && (has_web_inf_lib || has_web_inf_lib_provided) {
+        ArchiveLayout::SpringBootWar
+    } else if has_boot_inf_classes && has_boot_inf_lib {
+        ArchiveLayout::SpringBootJar
+    } else {
+        ArchiveLayout::Unknown
+    }
+}
+
 fn is_boot_loader_entry(path: &str) -> bool {
     path.ends_with(".class")
         && path.starts_with("org/springframework/boot/loader/")
         && (path.contains("Launcher.class") || path.contains("PropertiesLauncher.class"))
 }
 
-fn nested_jar_entry(path: &str) -> Option<&str> {
-    let lib_prefix = "BOOT-INF/lib/";
-    if !path.starts_with(lib_prefix) {
-        return None;
-    }
-
-    let rest = &path[lib_prefix.len()..];
+fn nested_library_entry(path: &str) -> Option<&str> {
+    let rest = path
+        .strip_prefix("BOOT-INF/lib/")
+        .or_else(|| path.strip_prefix("WEB-INF/lib/"))
+        .or_else(|| path.strip_prefix("WEB-INF/lib-provided/"))?;
     if rest.is_empty() {
         return None;
     }
@@ -1399,6 +1476,56 @@ mod tests {
                 b"server.port: 8080",
             ),
             ("BOOT-INF/lib/order.jar", CompressionMethod::Stored, &nested),
+        ])
+    }
+
+    fn spring_boot_war_fixture_with_nested_entries() -> PathBuf {
+        let lib_nested = nested_jar_bytes(&[
+            (
+                "com/acme/OrderService.class",
+                CompressionMethod::Deflated,
+                b"class-bytes",
+            ),
+            (
+                "com/acme/DuplicateName.class",
+                CompressionMethod::Stored,
+                b"lib-duplicate",
+            ),
+        ]);
+        let provided_nested = nested_jar_bytes(&[
+            (
+                "com/acme/ProvidedService.class",
+                CompressionMethod::Deflated,
+                b"provided-class-bytes",
+            ),
+            (
+                "com/acme/provided/DuplicateName.class",
+                CompressionMethod::Stored,
+                b"provided-duplicate",
+            ),
+        ]);
+
+        write_jar(&[
+            (
+                "WEB-INF/classes/application.yml",
+                CompressionMethod::Stored,
+                b"server.port: 8080",
+            ),
+            (
+                "WEB-INF/lib/order.jar",
+                CompressionMethod::Stored,
+                &lib_nested,
+            ),
+            (
+                "WEB-INF/lib-provided/container.jar",
+                CompressionMethod::Stored,
+                &provided_nested,
+            ),
+            (
+                "org/springframework/boot/loader/launch/WarLauncher.class",
+                CompressionMethod::Stored,
+                b"boot-loader",
+            ),
         ])
     }
 
@@ -1563,6 +1690,7 @@ mod tests {
 
         assert!(index.has_boot_inf_classes);
         assert!(index.has_boot_inf_lib);
+        assert_eq!(index.layout, ArchiveLayout::SpringBootJar);
         assert!(index.has_boot_loader_entry);
 
         assert_eq!(index.entries.len(), 5);
@@ -1583,6 +1711,33 @@ mod tests {
             .expect("compressed.jar must be present");
         assert!(!compressed.is_stored);
         assert_eq!(compressed.compression_method, "Deflated");
+    }
+
+    #[test]
+    fn indexes_spring_boot_war_markers_and_nested_storage() {
+        let war = spring_boot_war_fixture_with_nested_entries();
+        let index = build_jar_index(&war).unwrap();
+
+        assert_eq!(index.layout, ArchiveLayout::SpringBootWar);
+        assert!(index.has_web_inf_classes);
+        assert!(index.has_web_inf_lib);
+        assert!(index.has_web_inf_lib_provided);
+        assert!(index.has_boot_loader_entry);
+        assert_eq!(index.nested_jars.len(), 2);
+        assert!(index
+            .nested_jars
+            .iter()
+            .any(|entry| entry.path == "WEB-INF/lib/order.jar" && entry.is_stored));
+        assert!(index.nested_jars.iter().any(|entry| {
+            entry.path == "WEB-INF/lib-provided/container.jar" && entry.is_stored
+        }));
+        assert!(index.nested_entries.iter().any(|entry| {
+            entry.archive_path == "WEB-INF/lib/order.jar!/com/acme/OrderService.class"
+        }));
+        assert!(index.nested_entries.iter().any(|entry| {
+            entry.archive_path
+                == "WEB-INF/lib-provided/container.jar!/com/acme/ProvidedService.class"
+        }));
     }
 
     #[test]
@@ -1621,6 +1776,28 @@ mod tests {
             results,
             vec![FindResult {
                 archive_path: "BOOT-INF/classes/application.yml".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn finds_war_outer_and_nested_entries() {
+        let war = spring_boot_war_fixture_with_nested_entries();
+
+        let outer = find_in_jar(&war, "WEB-INF/classes/application.yml").unwrap();
+        assert_eq!(
+            outer,
+            vec![FindResult {
+                archive_path: "WEB-INF/classes/application.yml".to_string()
+            }]
+        );
+
+        let nested = find_in_jar(&war, "ProvidedService.class").unwrap();
+        assert_eq!(
+            nested,
+            vec![FindResult {
+                archive_path: "WEB-INF/lib-provided/container.jar!/com/acme/ProvidedService.class"
+                    .to_string()
             }]
         );
     }
@@ -1701,6 +1878,48 @@ mod tests {
             .candidates
             .iter()
             .all(|candidate| { candidate.reason == vec!["same filename".to_string()] }));
+    }
+
+    #[test]
+    fn match_selects_war_paths_and_marks_ambiguous_nested_filenames() {
+        let war = spring_boot_war_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let exact = dir.path().join("WEB-INF/classes/application.yml");
+        write_input_file(&exact, b"server.port: 9090");
+        let ambiguous = dir.path().join("DuplicateName.class");
+        write_input_file(&ambiguous, b"replacement");
+
+        let candidates = match_in_jar(&war, &[dir.path().to_path_buf()]).unwrap();
+
+        let exact_match = candidates
+            .matches
+            .iter()
+            .find(|input| input.input.ends_with("WEB-INF/classes/application.yml"))
+            .unwrap();
+        assert_eq!(exact_match.status, MatchStatus::Selected);
+        assert_eq!(
+            exact_match.candidates[0].target,
+            "WEB-INF/classes/application.yml"
+        );
+
+        let ambiguous_match = candidates
+            .matches
+            .iter()
+            .find(|input| input.input.ends_with("DuplicateName.class"))
+            .unwrap();
+        assert_eq!(ambiguous_match.status, MatchStatus::NeedsSelection);
+        let targets: Vec<&str> = ambiguous_match
+            .candidates
+            .iter()
+            .map(|candidate| candidate.target.as_str())
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                "WEB-INF/lib/order.jar!/com/acme/DuplicateName.class",
+                "WEB-INF/lib-provided/container.jar!/com/acme/provided/DuplicateName.class",
+            ]
+        );
     }
 
     #[test]
@@ -1932,6 +2151,39 @@ operations:
     }
 
     #[test]
+    fn apply_replaces_web_inf_classes_resource() {
+        let war = spring_boot_war_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("application.yml");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.war");
+        write_input_file(&replacement, b"server.port: 9090");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: WEB-INF/classes/application.yml
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        apply_patch_plan(&war, &plan, &output).unwrap();
+
+        assert_eq!(
+            read_jar_entry(&output, "WEB-INF/classes/application.yml"),
+            b"server.port: 9090"
+        );
+        assert!(verify_jar(&output).unwrap().is_success());
+    }
+
+    #[test]
     fn apply_fails_for_missing_replacement_source() {
         let jar = spring_boot_fixture_with_nested_entries();
         let dir = tempdir().unwrap();
@@ -2041,6 +2293,64 @@ operations:
     }
 
     #[test]
+    fn apply_replaces_war_nested_entries_and_stores_outer_entries() {
+        let war = spring_boot_war_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let lib_replacement = dir.path().join("OrderService.class");
+        let provided_replacement = dir.path().join("ProvidedService.class");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.war");
+        write_input_file(&lib_replacement, b"patched-lib-class");
+        write_input_file(&provided_replacement, b"patched-provided-class");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: WEB-INF/lib/order.jar!/com/acme/OrderService.class
+      with: "{}"
+  - replace-entry:
+      target: WEB-INF/lib-provided/container.jar!/com/acme/ProvidedService.class
+      with: "{}"
+"#,
+                lib_replacement.display(),
+                provided_replacement.display()
+            ),
+        )
+        .unwrap();
+
+        apply_patch_plan(&war, &plan, &output).unwrap();
+
+        assert_eq!(
+            read_nested_jar_entry(
+                &output,
+                "WEB-INF/lib/order.jar",
+                "com/acme/OrderService.class"
+            ),
+            b"patched-lib-class"
+        );
+        assert_eq!(
+            read_nested_jar_entry(
+                &output,
+                "WEB-INF/lib-provided/container.jar",
+                "com/acme/ProvidedService.class"
+            ),
+            b"patched-provided-class"
+        );
+        assert_eq!(
+            jar_entry_compression(&output, "WEB-INF/lib/order.jar"),
+            CompressionMethod::Stored
+        );
+        assert_eq!(
+            jar_entry_compression(&output, "WEB-INF/lib-provided/container.jar"),
+            CompressionMethod::Stored
+        );
+    }
+
+    #[test]
     fn apply_groups_multiple_operations_in_same_nested_jar() {
         let jar = spring_boot_fixture_with_nested_entries();
         let dir = tempdir().unwrap();
@@ -2136,6 +2446,47 @@ operations:
                 "com/acme/NewOrderService.class"
             ),
             b"new-class-bytes"
+        );
+    }
+
+    #[test]
+    fn apply_replaces_whole_war_nested_jar_and_stores_outer_entry() {
+        let war = spring_boot_war_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("container-replacement.jar");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.war");
+        let replacement_bytes = nested_jar_bytes(&[(
+            "com/acme/NewProvidedService.class",
+            CompressionMethod::Deflated,
+            b"new-class-bytes",
+        )]);
+        write_input_file(&replacement, &replacement_bytes);
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: WEB-INF/lib-provided/container.jar
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        apply_patch_plan(&war, &plan, &output).unwrap();
+
+        assert_eq!(
+            read_jar_entry(&output, "WEB-INF/lib-provided/container.jar"),
+            replacement_bytes
+        );
+        assert_eq!(
+            jar_entry_compression(&output, "WEB-INF/lib-provided/container.jar"),
+            CompressionMethod::Stored
         );
     }
 
@@ -2265,6 +2616,36 @@ operations:
     }
 
     #[test]
+    fn verify_fails_for_compressed_war_nested_jars() {
+        let nested = nested_jar_bytes(&[(
+            "com/acme/OrderService.class",
+            CompressionMethod::Stored,
+            b"",
+        )]);
+        let war = write_jar(&[
+            (
+                "WEB-INF/classes/application.yml",
+                CompressionMethod::Stored,
+                b"server.port: 8080",
+            ),
+            (
+                "WEB-INF/lib/order.jar",
+                CompressionMethod::Deflated,
+                &nested,
+            ),
+        ]);
+
+        let report = verify_jar(&war).unwrap();
+
+        assert!(!report.is_success());
+        assert_eq!(report.non_stored_nested_jars.len(), 1);
+        assert_eq!(
+            report.non_stored_nested_jars[0].path,
+            "WEB-INF/lib/order.jar"
+        );
+    }
+
+    #[test]
     fn verify_warns_on_signed_metadata() {
         let jar = write_jar(&[
             (
@@ -2371,6 +2752,7 @@ operations:
 
         assert!(!report.has_boot_inf_classes);
         assert!(!report.has_boot_inf_lib);
+        assert_eq!(report.layout, ArchiveLayout::Unknown);
         assert!(!report.has_boot_loader_entry);
         assert!(report.nested_jars.is_empty());
     }

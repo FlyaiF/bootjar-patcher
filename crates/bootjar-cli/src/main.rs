@@ -10,7 +10,7 @@ fn main() {
         Some("inspect") => {
             let path = args.next();
             if path.is_none() {
-                eprintln!("Usage: bootjar-patcher inspect <jar>");
+                eprintln!("Usage: bootjar-patcher inspect <archive>");
                 process::exit(2);
             }
             let path = Path::new(path.as_ref().unwrap());
@@ -29,7 +29,7 @@ fn main() {
             let path = args.next();
             let query = args.next();
             if path.is_none() || query.is_none() {
-                eprintln!("Usage: bootjar-patcher find <jar> <query>");
+                eprintln!("Usage: bootjar-patcher find <archive> <query>");
                 process::exit(2);
             }
             let path = Path::new(path.as_ref().unwrap());
@@ -54,13 +54,13 @@ fn main() {
                 Err(message) => {
                     eprintln!("{message}");
                     eprintln!(
-                        "Usage: bootjar-patcher match --jar <jar> --inputs <path> [--out <file>]"
+                        "Usage: bootjar-patcher match --archive <archive> --inputs <path> [--out <file>]"
                     );
                     process::exit(2);
                 }
             };
 
-            match bootjar_core::match_in_jar(&options.jar, &options.inputs) {
+            match bootjar_core::match_in_jar(&options.archive, &options.inputs) {
                 Ok(candidates) => {
                     let output = match options.format {
                         MatchFormat::Candidates => candidates.to_yaml(),
@@ -87,12 +87,14 @@ fn main() {
                 Ok(options) => options,
                 Err(message) => {
                     eprintln!("{message}");
-                    eprintln!("Usage: bootjar-patcher apply --jar <jar> --plan <plan> --out <jar>");
+                    eprintln!(
+                        "Usage: bootjar-patcher apply --archive <archive> --plan <plan> --out <archive>"
+                    );
                     process::exit(2);
                 }
             };
 
-            match bootjar_core::apply_patch_plan(&options.jar, &options.plan, &options.out) {
+            match bootjar_core::apply_patch_plan(&options.archive, &options.plan, &options.out) {
                 Ok(()) => {}
                 Err(err) => {
                     eprintln!("apply failed: {err}");
@@ -103,7 +105,7 @@ fn main() {
         Some("verify") => {
             let path = args.next();
             if path.is_none() {
-                eprintln!("Usage: bootjar-patcher verify <jar>");
+                eprintln!("Usage: bootjar-patcher verify <archive>");
                 process::exit(2);
             }
             let path = Path::new(path.as_ref().unwrap());
@@ -137,18 +139,18 @@ fn main() {
 
 fn print_usage() {
     eprintln!("Usage:");
-    eprintln!("  bootjar-patcher inspect <jar>");
-    eprintln!("  bootjar-patcher find <jar> <query>");
+    eprintln!("  bootjar-patcher inspect <archive>");
+    eprintln!("  bootjar-patcher find <archive> <query>");
     eprintln!(
-        "  bootjar-patcher match --jar <jar> --inputs <path> [--format candidates|snippets] [--out <file>]"
+        "  bootjar-patcher match --archive <archive> --inputs <path> [--format candidates|snippets] [--out <file>]"
     );
-    eprintln!("  bootjar-patcher apply --jar <jar> --plan <plan> --out <jar>");
-    eprintln!("  bootjar-patcher verify <jar>");
+    eprintln!("  bootjar-patcher apply --archive <archive> --plan <plan> --out <archive>");
+    eprintln!("  bootjar-patcher verify <archive>");
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct MatchOptions {
-    jar: PathBuf,
+    archive: PathBuf,
     inputs: Vec<PathBuf>,
     format: MatchFormat,
     out: Option<PathBuf>,
@@ -161,7 +163,7 @@ enum MatchFormat {
 }
 
 fn parse_match_options(args: Vec<String>) -> Result<MatchOptions, String> {
-    let mut jar = None;
+    let mut archive = None;
     let mut inputs = Vec::new();
     let mut format = MatchFormat::Candidates;
     let mut out = None;
@@ -169,12 +171,12 @@ fn parse_match_options(args: Vec<String>) -> Result<MatchOptions, String> {
 
     while index < args.len() {
         match args[index].as_str() {
-            "--jar" => {
+            "--archive" => {
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| "--jar requires a value".to_string())?;
-                jar = Some(PathBuf::from(value));
+                    .ok_or_else(|| "--archive requires a value".to_string())?;
+                archive = Some(PathBuf::from(value));
             }
             "--inputs" => {
                 index += 1;
@@ -206,13 +208,13 @@ fn parse_match_options(args: Vec<String>) -> Result<MatchOptions, String> {
         index += 1;
     }
 
-    let jar = jar.ok_or_else(|| "match requires --jar".to_string())?;
+    let archive = archive.ok_or_else(|| "match requires --archive".to_string())?;
     if inputs.is_empty() {
         return Err("match requires at least one --inputs path".to_string());
     }
 
     Ok(MatchOptions {
-        jar,
+        archive,
         inputs,
         format,
         out,
@@ -221,25 +223,25 @@ fn parse_match_options(args: Vec<String>) -> Result<MatchOptions, String> {
 
 #[derive(Debug, PartialEq, Eq)]
 struct ApplyOptions {
-    jar: PathBuf,
+    archive: PathBuf,
     plan: PathBuf,
     out: PathBuf,
 }
 
 fn parse_apply_options(args: Vec<String>) -> Result<ApplyOptions, String> {
-    let mut jar = None;
+    let mut archive = None;
     let mut plan = None;
     let mut out = None;
     let mut index = 0;
 
     while index < args.len() {
         match args[index].as_str() {
-            "--jar" => {
+            "--archive" => {
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| "--jar requires a value".to_string())?;
-                jar = Some(PathBuf::from(value));
+                    .ok_or_else(|| "--archive requires a value".to_string())?;
+                archive = Some(PathBuf::from(value));
             }
             "--plan" => {
                 index += 1;
@@ -261,19 +263,29 @@ fn parse_apply_options(args: Vec<String>) -> Result<ApplyOptions, String> {
     }
 
     Ok(ApplyOptions {
-        jar: jar.ok_or_else(|| "apply requires --jar".to_string())?,
+        archive: archive.ok_or_else(|| "apply requires --archive".to_string())?,
         plan: plan.ok_or_else(|| "apply requires --plan".to_string())?,
         out: out.ok_or_else(|| "apply requires --out".to_string())?,
     })
 }
 
 fn print_inspect_report(report: &bootjar_core::InspectReport) {
-    println!("Jar: {}", report.jar_path);
+    println!("Archive: {}", report.jar_path);
+    println!("Layout: {}", format_layout(report.layout));
     println!(
         "BOOT-INF/classes: {}",
         format_flag(report.has_boot_inf_classes)
     );
     println!("BOOT-INF/lib: {}", format_flag(report.has_boot_inf_lib));
+    println!(
+        "WEB-INF/classes: {}",
+        format_flag(report.has_web_inf_classes)
+    );
+    println!("WEB-INF/lib: {}", format_flag(report.has_web_inf_lib));
+    println!(
+        "WEB-INF/lib-provided: {}",
+        format_flag(report.has_web_inf_lib_provided)
+    );
     println!(
         "Spring Boot launcher entries: {}",
         format_flag(report.has_boot_loader_entry)
@@ -297,6 +309,14 @@ fn print_inspect_report(report: &bootjar_core::InspectReport) {
     }
 }
 
+fn format_layout(layout: bootjar_core::ArchiveLayout) -> &'static str {
+    match layout {
+        bootjar_core::ArchiveLayout::SpringBootJar => "Spring Boot JAR",
+        bootjar_core::ArchiveLayout::SpringBootWar => "Spring Boot WAR",
+        bootjar_core::ArchiveLayout::Unknown => "unknown",
+    }
+}
+
 fn format_flag(value: bool) -> &'static str {
     if value {
         "present"
@@ -306,9 +326,9 @@ fn format_flag(value: bool) -> &'static str {
 }
 
 fn print_verify_report(report: &bootjar_core::VerifyReport) {
-    println!("Jar: {}", report.jar_path);
+    println!("Archive: {}", report.jar_path);
     println!("Readable: {}", format_flag(report.readable));
-    println!("BOOT-INF/lib nested jars:");
+    println!("Nested jars:");
     if report.nested_jars.is_empty() {
         println!("  (none)");
     } else {

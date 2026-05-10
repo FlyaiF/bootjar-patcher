@@ -19,7 +19,9 @@
   <modules>
     <module>lib-one</module>
     <module>lib-two</module>
+    <module>provided-lib</module>
     <module>app</module>
+    <module>war-app</module>
   </modules>
 
   <properties>
