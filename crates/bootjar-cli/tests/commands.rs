@@ -511,6 +511,71 @@ matches: []
 }
 
 #[test]
+fn apply_fails_after_writing_output_that_does_not_verify() {
+    let nested = nested_jar_bytes(&[(
+        "com/acme/OrderService.class",
+        CompressionMethod::Stored,
+        b"class-bytes",
+    )]);
+    let jar = write_jar(&[
+        (
+            "BOOT-INF/classes/application.yml",
+            CompressionMethod::Stored,
+            b"server.port: 8080",
+        ),
+        (
+            "BOOT-INF/lib/order.jar",
+            CompressionMethod::Deflated,
+            &nested,
+        ),
+    ]);
+    let dir = tempdir().unwrap();
+    let replacement = dir.path().join("application.yml");
+    let plan = dir.path().join("patch-plan.yaml");
+    let output_jar = dir.path().join("app-patched.jar");
+    write_input_file(&replacement, b"server.port: 9090");
+    std::fs::write(
+        &plan,
+        format!(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/classes/application.yml
+      with: "{}"
+"#,
+            replacement.display()
+        ),
+    )
+    .unwrap();
+
+    let output = command(&[
+        "apply",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--out",
+        output_jar.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("apply failed: verification failed after writing output"));
+    assert!(stderr.contains("BOOT-INF/lib/order.jar"));
+    assert!(output_jar.exists());
+    assert_eq!(
+        read_jar_entry(&output_jar, "BOOT-INF/classes/application.yml"),
+        b"server.port: 9090"
+    );
+    assert_eq!(
+        jar_entry_compression(&output_jar, "BOOT-INF/lib/order.jar"),
+        CompressionMethod::Deflated
+    );
+}
+
+#[test]
 fn verify_succeeds_for_stored_nested_jars() {
     let jar = spring_boot_jar();
     let output = command(&["verify", jar.to_str().unwrap()]);

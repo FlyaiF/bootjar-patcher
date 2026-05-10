@@ -292,6 +292,13 @@ reviewed patch plans.
 The `apply` command MUST write a new output jar rather than mutating the input jar
 in place.
 
+The `apply` command MUST verify the output jar after writing.
+
+The `apply` command MUST fail when post-write verification fails.
+
+The `apply` command MUST leave the written output jar in place when post-write
+verification fails.
+
 The `apply` command MUST fail when a replacement source file does not exist.
 
 The `apply` command MUST fail when a replace target does not exist in the input jar.
@@ -302,6 +309,14 @@ Given an input jar and a reviewed patch plan with valid replace operations
 When the user runs `bootjar-patcher apply --jar app.jar --plan patch.yaml --out app-patched.jar`
 Then the tool writes `app-patched.jar`
 And the original `app.jar` is not mutated
+
+#### Scenario: Reject output that fails verification
+
+Given an input jar containing a compressed `BOOT-INF/lib/order.jar` outer entry
+And a reviewed patch plan with otherwise valid replace operations
+When the user runs `bootjar-patcher apply --jar app.jar --plan patch.yaml --out app-patched.jar`
+Then the command fails after writing `app-patched.jar`
+And the output explains that post-write verification failed for `BOOT-INF/lib/order.jar`
 
 #### Scenario: Reject candidates file
 

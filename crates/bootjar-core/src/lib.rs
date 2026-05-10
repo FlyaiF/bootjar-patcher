@@ -229,6 +229,14 @@ pub enum ApplyError {
         source: ZipError,
     },
     DuplicateTarget(String),
+    VerificationReadFailed {
+        output: PathBuf,
+        source: JarInspectError,
+    },
+    VerificationFailed {
+        output: PathBuf,
+        non_stored_nested_jars: Vec<NestedJarInfo>,
+    },
 }
 
 impl fmt::Display for ApplyError {
@@ -290,6 +298,32 @@ impl fmt::Display for ApplyError {
             }
             Self::DuplicateTarget(target) => {
                 write!(f, "duplicate replace target in patch plan: {target}")
+            }
+            Self::VerificationReadFailed { output, source } => {
+                write!(
+                    f,
+                    "could not verify written output {}: {source}",
+                    output.display()
+                )
+            }
+            Self::VerificationFailed {
+                output,
+                non_stored_nested_jars,
+            } => {
+                write!(
+                    f,
+                    "verification failed after writing output {}",
+                    output.display()
+                )?;
+
+                if !non_stored_nested_jars.is_empty() {
+                    write!(f, ": non-STORED nested jars")?;
+                    for nested_jar in non_stored_nested_jars {
+                        write!(f, " {}", nested_jar.path)?;
+                    }
+                }
+
+                Ok(())
             }
         }
     }
@@ -664,7 +698,21 @@ pub fn apply_patch_plan(
     })?;
     let plan = parse_patch_plan(&plan_yaml)?;
     let replacements = resolve_replacements(&plan)?;
-    rewrite_outer_jar_with_plan(input_jar, output_jar, replacements)
+    rewrite_outer_jar_with_plan(input_jar, output_jar, replacements)?;
+
+    let report = verify_jar(output_jar).map_err(|source| ApplyError::VerificationReadFailed {
+        output: output_jar.to_path_buf(),
+        source,
+    })?;
+
+    if !report.is_success() {
+        return Err(ApplyError::VerificationFailed {
+            output: output_jar.to_path_buf(),
+            non_stored_nested_jars: report.non_stored_nested_jars,
+        });
+    }
+
+    Ok(())
 }
 
 impl CandidateFile {
@@ -2121,6 +2169,65 @@ operations:
             matches!(err, ApplyError::InvalidReplacementNestedJar { path, .. } if path == replacement)
         );
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn apply_fails_after_writing_output_that_does_not_verify() {
+        let nested = nested_jar_bytes(&[(
+            "com/acme/OrderService.class",
+            CompressionMethod::Stored,
+            b"class-bytes",
+        )]);
+        let jar = write_jar(&[
+            (
+                "BOOT-INF/classes/application.yml",
+                CompressionMethod::Stored,
+                b"server.port: 8080",
+            ),
+            (
+                "BOOT-INF/lib/order.jar",
+                CompressionMethod::Deflated,
+                &nested,
+            ),
+        ]);
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("application.yml");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        write_input_file(&replacement, b"server.port: 9090");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/classes/application.yml
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        let err = apply_patch_plan(&jar, &plan, &output).unwrap_err();
+
+        assert!(
+            matches!(err, ApplyError::VerificationFailed { output: failed_output, non_stored_nested_jars }
+                if failed_output == output
+                    && non_stored_nested_jars.len() == 1
+                    && non_stored_nested_jars[0].path == "BOOT-INF/lib/order.jar")
+        );
+        assert!(output.exists());
+        assert_eq!(
+            read_jar_entry(&output, "BOOT-INF/classes/application.yml"),
+            b"server.port: 9090"
+        );
+        assert_eq!(
+            jar_entry_compression(&output, "BOOT-INF/lib/order.jar"),
+            CompressionMethod::Deflated
+        );
     }
 
     #[test]
