@@ -2222,7 +2222,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("missing");
 
-        let err = match_in_jar(&jar, &[missing.clone()]).unwrap_err();
+        let err = match_in_jar(&jar, std::slice::from_ref(&missing)).unwrap_err();
 
         assert!(matches!(err, MatchError::InputPath { path, .. } if path == missing));
     }

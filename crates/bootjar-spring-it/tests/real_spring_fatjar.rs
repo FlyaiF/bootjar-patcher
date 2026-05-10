@@ -489,7 +489,7 @@ fn find_match_apply_and_verify_real_zip_wrapper() {
     let app_input = patch_root.join("app/service.jar!/BOOT-INF/classes/application.yml");
     write_file(&runtime_input, b"env: patched\n");
     write_file(&app_input, b"fixture:\n  message: wrapper\n");
-    let candidates = match_in_jar(&wrapper, &[patch_root.clone()]).unwrap();
+    let candidates = match_in_jar(&wrapper, std::slice::from_ref(&patch_root)).unwrap();
     assert!(candidates.matches.iter().any(|input| {
         input.status == MatchStatus::Selected
             && input
