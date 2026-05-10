@@ -10,6 +10,7 @@ Detailed behavior lives in:
 
 - `openspec/project.md` — broader product context
 - `openspec/specs/bootjar-patcher/spec.md` — source-of-truth behavioral spec
+- `crates/bootjar-cli/RUNBOOK.md` — CLI command and operations runbook
 - `openspec/changes/implement-archive-paths-and-inspect/` — active first implementation change
 
 ## Project goal
