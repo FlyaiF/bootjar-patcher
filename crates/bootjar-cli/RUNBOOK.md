@@ -75,6 +75,25 @@ when running against `dist.zip`, a contained archive path is shown as
 
 ## Commands
 
+### help and version
+
+```bash
+bootjar-patcher --help
+bootjar-patcher --version
+bootjar-patcher version
+```
+
+Help prints command usage plus build information. Version output prints only build
+information for incident reports:
+
+- package version
+- Git commit
+- Git tags pointing at the commit, or `none`
+- Git branch
+- Git dirty state at build time
+- Cargo build target and profile
+- `rustc --version`
+
 ### inspect
 
 ```bash

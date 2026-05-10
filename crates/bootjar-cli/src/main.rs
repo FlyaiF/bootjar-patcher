@@ -129,6 +129,9 @@ fn main() {
                 process::exit(2);
             }
         }
+        Some("version") | Some("-V") | Some("--version") => {
+            print_build_info();
+        }
         Some(other) => {
             eprintln!("unknown command: {other}");
             print_usage();
@@ -146,6 +149,31 @@ fn print_usage() {
     );
     eprintln!("  bootjar-patcher apply --archive <archive> --plan <plan> --out <archive>");
     eprintln!("  bootjar-patcher verify <archive>");
+    eprintln!("  bootjar-patcher version");
+    eprintln!();
+    eprintln!("Build:");
+    for line in build_info_lines() {
+        eprintln!("  {line}");
+    }
+}
+
+fn print_build_info() {
+    for line in build_info_lines() {
+        println!("{line}");
+    }
+}
+
+fn build_info_lines() -> Vec<String> {
+    vec![
+        format!("Version: {}", env!("CARGO_PKG_VERSION")),
+        format!("Git commit: {}", env!("BUILD_GIT_COMMIT")),
+        format!("Git tags: {}", env!("BUILD_GIT_TAGS")),
+        format!("Git branch: {}", env!("BUILD_GIT_BRANCH")),
+        format!("Git dirty: {}", env!("BUILD_GIT_DIRTY")),
+        format!("Build target: {}", env!("BUILD_TARGET")),
+        format!("Build profile: {}", env!("BUILD_PROFILE")),
+        format!("Rustc: {}", env!("BUILD_RUSTC_VERSION")),
+    ]
 }
 
 #[derive(Debug, PartialEq, Eq)]

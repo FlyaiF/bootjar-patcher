@@ -212,6 +212,40 @@ fn inspect_reports_spring_boot_layout() {
 }
 
 #[test]
+fn help_prints_build_information() {
+    let output = command(&["--help"]);
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("bootjar-patcher version"));
+    assert!(stderr.contains("Build:"));
+    assert!(stderr.contains("Version:"));
+    assert!(stderr.contains("Git commit:"));
+    assert!(stderr.contains("Git tags:"));
+    assert!(stderr.contains("Git branch:"));
+    assert!(stderr.contains("Git dirty:"));
+    assert!(stderr.contains("Build target:"));
+    assert!(stderr.contains("Build profile:"));
+    assert!(stderr.contains("Rustc:"));
+}
+
+#[test]
+fn version_prints_build_information() {
+    let output = command(&["--version"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Version:"));
+    assert!(stdout.contains("Git commit:"));
+    assert!(stdout.contains("Git tags:"));
+    assert!(stdout.contains("Git branch:"));
+    assert!(stdout.contains("Git dirty:"));
+    assert!(stdout.contains("Build target:"));
+    assert!(stdout.contains("Build profile:"));
+    assert!(stdout.contains("Rustc:"));
+}
+
+#[test]
 fn inspect_reports_spring_boot_war_layout() {
     let war = spring_boot_war();
     let output = command(&["inspect", war.to_str().unwrap()]);
