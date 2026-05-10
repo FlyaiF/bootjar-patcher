@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/bootjar-core",
+    "crates/bootjar-cli",
+]
+resolver = "2"

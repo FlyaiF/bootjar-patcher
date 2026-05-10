@@ -1,0 +1,15 @@
+kind: patch-plan
+version: 1
+
+operations:
+  - replace-entry:
+      target: BOOT-INF/classes/application.yml
+      with: ./patch/application.yml
+
+  - replace-entry:
+      target: BOOT-INF/lib/order-module-1.4.2.jar!/com/acme/order/OrderCalculator.class
+      with: ./patch/OrderCalculator.class
+
+  - replace-entry:
+      target: BOOT-INF/lib/common-module-2.7.0.jar
+      with: ./patch/common-module-2.7.0-hotfix.jar

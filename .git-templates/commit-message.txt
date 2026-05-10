@@ -1,0 +1,18 @@
+# <type>(<scope>): <short imperative summary>
+#
+# Why:
+# - 
+#
+# What changed:
+# - 
+#
+# Notes / risks:
+# - 
+#
+# Footer examples:
+# Fixes #123
+# Closes #456
+# BREAKING CHANGE: explain the incompatible change
+#
+# Types:
+# feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert

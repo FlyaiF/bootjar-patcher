@@ -1,0 +1,39 @@
+schema: spec-driven
+
+context: |
+  Project: bootjar-patcher
+
+  Summary:
+  Cross-platform CLI plus reusable Rust core library for inspecting, discovering,
+  planning, and applying patches to Spring Boot executable fat jars.
+
+  Stack:
+  - Language: Rust
+  - crates/bootjar-core: reusable library; no CLI/UI logic
+  - crates/bootjar-cli: CLI wrapper only
+  - Platforms: Windows, Linux, macOS
+
+  Critical constraints:
+  - Spring Boot executable jars use BOOT-INF/classes for app classes/resources.
+  - Spring Boot executable jars use BOOT-INF/lib for dependency jars.
+  - Outer entries for BOOT-INF/lib/*.jar must be STORED/uncompressed.
+  - Nested jar contents may keep their own compression.
+  - For STORED zip entries, size and CRC32 must be known before writing.
+  - Archive paths use ! for nested entries, e.g. BOOT-INF/lib/a.jar!/com/acme/Foo.class.
+
+  Product rules:
+  - Candidate matching is assistive; ambiguous filename matches must not auto-apply.
+  - Apply reviewed patch plans only; generated candidate files are not patch plans.
+  - Rewrite each affected nested jar at most once per apply run.
+  - Always verify Spring Boot nested-jar storage after rebuilding.
+  - Do not require a JVM at runtime.
+
+rules:
+  proposal:
+    - Explain the user problem and why the change is needed.
+    - Mention Spring Boot jar constraints when archive writing is affected.
+  design:
+    - Keep CLI behavior separate from core library APIs.
+    - Include failure modes and verification behavior.
+  tasks:
+    - Include tests for BOOT-INF/classes patches, nested jar patches, and ambiguous matches.

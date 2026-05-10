@@ -1,0 +1,18 @@
+kind: candidates
+version: 1
+source: app.jar
+
+matches:
+  - input: ./patch/OrderCalculator.class
+    status: needs-selection
+    candidates:
+      - target: BOOT-INF/classes/com/acme/order/OrderCalculator.class
+        score: 96
+        reason:
+          - same filename
+          - class path match
+      - target: BOOT-INF/lib/order-module-1.4.2.jar!/com/acme/order/OrderCalculator.class
+        score: 91
+        reason:
+          - same filename
+          - found inside nested jar
