@@ -1,12 +1,15 @@
 //! Core library for `bootjar-patcher`.
 //! Provides archive path parsing and jar inspection primitives.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Cursor, Read};
+use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use zip::result::ZipError;
+use zip::write::FileOptions;
 use zip::CompressionMethod;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +197,81 @@ impl From<JarInspectError> for MatchError {
     }
 }
 
+#[derive(Debug)]
+pub enum ApplyError {
+    Io {
+        path: PathBuf,
+        action: &'static str,
+        source: io::Error,
+    },
+    InvalidJar(ZipError),
+    InvalidPlanYaml(serde_yaml::Error),
+    UnsupportedPlanKind(String),
+    UnsupportedPlanVersion(u32),
+    UnsupportedOperation,
+    InvalidTarget {
+        target: String,
+        source: ArchivePathParseError,
+    },
+    UnsupportedNestedTarget(String),
+    MissingReplacementSource(PathBuf),
+    MissingTarget(String),
+    DuplicateTarget(String),
+}
+
+impl fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io {
+                path,
+                action,
+                source,
+            } => {
+                write!(f, "could not {action} {}: {source}", path.display())
+            }
+            Self::InvalidJar(error) => write!(f, "jar is not readable: {error}"),
+            Self::InvalidPlanYaml(error) => write!(f, "patch plan YAML is invalid: {error}"),
+            Self::UnsupportedPlanKind(kind) if kind == "candidates" => {
+                write!(f, "candidates files are not reviewed patch plans")
+            }
+            Self::UnsupportedPlanKind(kind) => {
+                write!(f, "unsupported patch plan kind: {kind}")
+            }
+            Self::UnsupportedPlanVersion(version) => {
+                write!(f, "unsupported patch plan version: {version}")
+            }
+            Self::UnsupportedOperation => write!(f, "unsupported patch plan operation"),
+            Self::InvalidTarget { target, source } => {
+                write!(f, "invalid replace target {target}: {source}")
+            }
+            Self::UnsupportedNestedTarget(target) => {
+                write!(f, "nested replace target is not supported yet: {target}")
+            }
+            Self::MissingReplacementSource(path) => {
+                write!(
+                    f,
+                    "replacement source file could not be read: {}",
+                    path.display()
+                )
+            }
+            Self::MissingTarget(target) => {
+                write!(f, "replace target does not exist in input jar: {target}")
+            }
+            Self::DuplicateTarget(target) => {
+                write!(f, "duplicate replace target in patch plan: {target}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ApplyError {}
+
+impl From<ZipError> for ApplyError {
+    fn from(value: ZipError) -> Self {
+        Self::InvalidJar(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JarEntry {
     pub path: String,
@@ -279,10 +357,50 @@ pub struct CandidateTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchPlan {
+    pub operations: Vec<ReplaceOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceOperation {
+    pub target: String,
+    pub source: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct InputFile {
     display_path: String,
     relative_path: String,
     file_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDocumentKind {
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPatchPlan {
+    #[serde(rename = "kind")]
+    _kind: String,
+    version: u32,
+    operations: Vec<RawOperation>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOperation {
+    #[serde(rename = "replace-entry")]
+    replace_entry: Option<RawReplaceEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReplaceEntry {
+    target: String,
+    #[serde(rename = "with")]
+    source: PathBuf,
 }
 
 pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectError> {
@@ -406,6 +524,65 @@ pub fn match_in_jar(
     let index = build_jar_index(jar_path.to_path_buf())?;
     let inputs = collect_input_files(input_roots)?;
     Ok(index.match_inputs(jar_path, &inputs))
+}
+
+pub fn parse_patch_plan(yaml: &str) -> Result<PatchPlan, ApplyError> {
+    let raw_kind: RawDocumentKind =
+        serde_yaml::from_str(yaml).map_err(ApplyError::InvalidPlanYaml)?;
+    if raw_kind.kind != "patch-plan" {
+        return Err(ApplyError::UnsupportedPlanKind(raw_kind.kind));
+    }
+
+    let raw: RawPatchPlan = serde_yaml::from_str(yaml).map_err(ApplyError::InvalidPlanYaml)?;
+    if raw.version != 1 {
+        return Err(ApplyError::UnsupportedPlanVersion(raw.version));
+    }
+
+    let mut seen_targets = BTreeSet::new();
+    let mut operations = Vec::with_capacity(raw.operations.len());
+    for raw_operation in raw.operations {
+        let replace_entry = raw_operation
+            .replace_entry
+            .ok_or(ApplyError::UnsupportedOperation)?;
+        let archive_path = ArchivePath::parse(&replace_entry.target).map_err(|source| {
+            ApplyError::InvalidTarget {
+                target: replace_entry.target.clone(),
+                source,
+            }
+        })?;
+        if matches!(archive_path, ArchivePath::Nested { .. }) {
+            return Err(ApplyError::UnsupportedNestedTarget(replace_entry.target));
+        }
+        if !seen_targets.insert(replace_entry.target.clone()) {
+            return Err(ApplyError::DuplicateTarget(replace_entry.target));
+        }
+
+        operations.push(ReplaceOperation {
+            target: replace_entry.target,
+            source: replace_entry.source,
+        });
+    }
+
+    Ok(PatchPlan { operations })
+}
+
+pub fn apply_patch_plan(
+    input_jar: impl AsRef<Path>,
+    plan_path: impl AsRef<Path>,
+    output_jar: impl AsRef<Path>,
+) -> Result<(), ApplyError> {
+    let input_jar = input_jar.as_ref();
+    let plan_path = plan_path.as_ref();
+    let output_jar = output_jar.as_ref();
+
+    let plan_yaml = std::fs::read_to_string(plan_path).map_err(|source| ApplyError::Io {
+        path: plan_path.to_path_buf(),
+        action: "read patch plan",
+        source,
+    })?;
+    let plan = parse_patch_plan(&plan_yaml)?;
+    let replacements = read_replacements(&plan)?;
+    rewrite_outer_jar(input_jar, output_jar, replacements)
 }
 
 impl CandidateFile {
@@ -676,6 +853,82 @@ fn yaml_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+fn read_replacements(plan: &PatchPlan) -> Result<BTreeMap<String, Vec<u8>>, ApplyError> {
+    let mut replacements = BTreeMap::new();
+    for operation in &plan.operations {
+        let bytes = std::fs::read(&operation.source)
+            .map_err(|_| ApplyError::MissingReplacementSource(operation.source.clone()))?;
+        replacements.insert(operation.target.clone(), bytes);
+    }
+    Ok(replacements)
+}
+
+fn rewrite_outer_jar(
+    input_jar: &Path,
+    output_jar: &Path,
+    mut replacements: BTreeMap<String, Vec<u8>>,
+) -> Result<(), ApplyError> {
+    let input = File::open(input_jar).map_err(|source| ApplyError::Io {
+        path: input_jar.to_path_buf(),
+        action: "read input jar",
+        source,
+    })?;
+    let mut archive = zip::ZipArchive::new(input)?;
+    let mut existing_paths = BTreeSet::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index)?;
+        if !entry.is_dir() {
+            existing_paths.insert(normalize_entry_name(entry.name()));
+        }
+    }
+    for target in replacements.keys() {
+        if !existing_paths.contains(target) {
+            return Err(ApplyError::MissingTarget(target.clone()));
+        }
+    }
+
+    let output = File::create(output_jar).map_err(|source| ApplyError::Io {
+        path: output_jar.to_path_buf(),
+        action: "write output jar",
+        source,
+    })?;
+    let mut writer = zip::ZipWriter::new(output);
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let path = normalize_entry_name(entry.name());
+        let mut options = FileOptions::default()
+            .compression_method(entry.compression())
+            .last_modified_time(entry.last_modified());
+        if let Some(mode) = entry.unix_mode() {
+            options = options.unix_permissions(mode);
+        }
+
+        if entry.is_dir() {
+            writer.add_directory(&path, options)?;
+            continue;
+        }
+
+        writer.start_file(&path, options)?;
+        if let Some(bytes) = replacements.remove(&path) {
+            writer.write_all(&bytes).map_err(|source| ApplyError::Io {
+                path: output_jar.to_path_buf(),
+                action: "write output jar",
+                source,
+            })?;
+        } else {
+            io::copy(&mut entry, &mut writer).map_err(|source| ApplyError::Io {
+                path: output_jar.to_path_buf(),
+                action: "write output jar",
+                source,
+            })?;
+        }
+    }
+
+    writer.finish()?;
+    Ok(())
+}
+
 fn is_boot_inf_classes_entry(path: &str) -> bool {
     path == "BOOT-INF/classes"
         || path == "BOOT-INF/classes/"
@@ -858,6 +1111,15 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn read_jar_entry(path: &Path, entry_name: &str) -> Vec<u8> {
+        let file = File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name(entry_name).unwrap();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        bytes
     }
 
     #[test]
@@ -1215,6 +1477,171 @@ mod tests {
         ));
         assert!(snippets.contains("# no-match: \"./patch/Missing.class\"\n"));
         assert!(!snippets.lines().any(|line| line == "  - replace-entry:"));
+    }
+
+    #[test]
+    fn parses_patch_plan_replace_operations() {
+        let plan = parse_patch_plan(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/classes/application.yml
+      with: ./patch/application.yml
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan,
+            PatchPlan {
+                operations: vec![ReplaceOperation {
+                    target: "BOOT-INF/classes/application.yml".to_string(),
+                    source: PathBuf::from("./patch/application.yml"),
+                }]
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_candidates_as_patch_plan() {
+        let err = parse_patch_plan(
+            r#"
+kind: candidates
+version: 1
+matches: []
+"#,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ApplyError::UnsupportedPlanKind(kind) if kind == "candidates"));
+    }
+
+    #[test]
+    fn apply_replaces_boot_inf_classes_resource() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("application.yml");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        write_input_file(&replacement, b"server.port: 9090");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/classes/application.yml
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        apply_patch_plan(&jar, &plan, &output).unwrap();
+
+        assert_eq!(
+            read_jar_entry(&output, "BOOT-INF/classes/application.yml"),
+            b"server.port: 9090"
+        );
+        assert_eq!(
+            read_jar_entry(&jar, "BOOT-INF/classes/application.yml"),
+            b"server.port: 8080"
+        );
+        assert_eq!(
+            read_jar_entry(&output, "BOOT-INF/lib/order.jar"),
+            read_jar_entry(&jar, "BOOT-INF/lib/order.jar")
+        );
+    }
+
+    #[test]
+    fn apply_fails_for_missing_replacement_source() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing.yml");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/classes/application.yml
+      with: "{}"
+"#,
+                missing.display()
+            ),
+        )
+        .unwrap();
+
+        let err = apply_patch_plan(&jar, &plan, &output).unwrap_err();
+
+        assert!(matches!(err, ApplyError::MissingReplacementSource(path) if path == missing));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn apply_fails_for_missing_outer_target() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("application.yml");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        write_input_file(&replacement, b"server.port: 9090");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/classes/missing.yml
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        let err = apply_patch_plan(&jar, &plan, &output).unwrap_err();
+
+        assert!(
+            matches!(err, ApplyError::MissingTarget(target) if target == "BOOT-INF/classes/missing.yml")
+        );
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn apply_rejects_nested_targets_for_this_slice() {
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("OrderService.class");
+        write_input_file(&replacement, b"class-bytes");
+        let err = parse_patch_plan(&format!(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/lib/order.jar!/com/acme/OrderService.class
+      with: "{}"
+"#,
+            replacement.display()
+        ))
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApplyError::UnsupportedNestedTarget(target)
+                if target == "BOOT-INF/lib/order.jar!/com/acme/OrderService.class"
+        ));
     }
 
     #[test]

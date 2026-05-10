@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -82,6 +82,15 @@ fn write_input_file(path: &std::path::Path, bytes: &[u8]) {
         std::fs::create_dir_all(parent).unwrap();
     }
     std::fs::write(path, bytes).unwrap();
+}
+
+fn read_jar_entry(path: &std::path::Path, entry_name: &str) -> Vec<u8> {
+    let file = std::fs::File::open(path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut entry = archive.by_name(entry_name).unwrap();
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).unwrap();
+    bytes
 }
 
 #[test]
@@ -310,4 +319,81 @@ fn match_rejects_unknown_format() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("unknown match format: xml"));
+}
+
+#[test]
+fn apply_replaces_outer_entry() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    let replacement = dir.path().join("application.yml");
+    let plan = dir.path().join("patch-plan.yaml");
+    let output_jar = dir.path().join("app-patched.jar");
+    write_input_file(&replacement, b"server.port: 9090");
+    std::fs::write(
+        &plan,
+        format!(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/classes/application.yml
+      with: "{}"
+"#,
+            replacement.display()
+        ),
+    )
+    .unwrap();
+
+    let output = command(&[
+        "apply",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--out",
+        output_jar.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        read_jar_entry(&output_jar, "BOOT-INF/classes/application.yml"),
+        b"server.port: 9090"
+    );
+    assert_eq!(
+        read_jar_entry(&jar, "BOOT-INF/classes/application.yml"),
+        b"server.port: 8080"
+    );
+}
+
+#[test]
+fn apply_rejects_candidates_file() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    let plan = dir.path().join("candidates.yaml");
+    let output_jar = dir.path().join("app-patched.jar");
+    std::fs::write(
+        &plan,
+        r#"
+kind: candidates
+version: 1
+matches: []
+"#,
+    )
+    .unwrap();
+
+    let output = command(&[
+        "apply",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--out",
+        output_jar.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("apply failed: candidates files are not reviewed patch plans"));
+    assert!(!output_jar.exists());
 }

@@ -81,6 +81,25 @@ fn main() {
                 }
             }
         }
+        Some("apply") => {
+            let options = parse_apply_options(args.collect());
+            let options = match options {
+                Ok(options) => options,
+                Err(message) => {
+                    eprintln!("{message}");
+                    eprintln!("Usage: bootjar-patcher apply --jar <jar> --plan <plan> --out <jar>");
+                    process::exit(2);
+                }
+            };
+
+            match bootjar_core::apply_patch_plan(&options.jar, &options.plan, &options.out) {
+                Ok(()) => {}
+                Err(err) => {
+                    eprintln!("apply failed: {err}");
+                    process::exit(1);
+                }
+            }
+        }
         Some("help") | Some("-h") | Some("--help") | None => {
             print_usage();
             if command.is_none() {
@@ -102,6 +121,7 @@ fn print_usage() {
     eprintln!(
         "  bootjar-patcher match --jar <jar> --inputs <path> [--format candidates|snippets] [--out <file>]"
     );
+    eprintln!("  bootjar-patcher apply --jar <jar> --plan <plan> --out <jar>");
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -174,6 +194,54 @@ fn parse_match_options(args: Vec<String>) -> Result<MatchOptions, String> {
         inputs,
         format,
         out,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ApplyOptions {
+    jar: PathBuf,
+    plan: PathBuf,
+    out: PathBuf,
+}
+
+fn parse_apply_options(args: Vec<String>) -> Result<ApplyOptions, String> {
+    let mut jar = None;
+    let mut plan = None;
+    let mut out = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--jar" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--jar requires a value".to_string())?;
+                jar = Some(PathBuf::from(value));
+            }
+            "--plan" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--plan requires a value".to_string())?;
+                plan = Some(PathBuf::from(value));
+            }
+            "--out" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--out requires a value".to_string())?;
+                out = Some(PathBuf::from(value));
+            }
+            unknown => return Err(format!("unknown apply option: {unknown}")),
+        }
+        index += 1;
+    }
+
+    Ok(ApplyOptions {
+        jar: jar.ok_or_else(|| "apply requires --jar".to_string())?,
+        plan: plan.ok_or_else(|| "apply requires --plan".to_string())?,
+        out: out.ok_or_else(|| "apply requires --out".to_string())?,
     })
 }
 
