@@ -644,7 +644,7 @@ fn verify_and_apply_fail_for_real_spring_jar_with_compressed_nested_entry() {
 
     let err = apply_patch_plan(&compressed_input, &plan, &output).unwrap_err();
     assert!(
-        matches!(err, ApplyError::VerificationFailed { output: failed_output, non_stored_nested_jars }
+        matches!(err, ApplyError::VerificationFailed { output: failed_output, non_stored_nested_jars, .. }
             if failed_output == output
                 && non_stored_nested_jars.iter().any(|nested| nested.path == LIB_ONE_JAR))
     );
@@ -674,7 +674,7 @@ fn verify_and_apply_fail_for_real_spring_war_with_compressed_nested_entry() {
 
     let err = apply_patch_plan(&compressed_input, &plan, &output).unwrap_err();
     assert!(
-        matches!(err, ApplyError::VerificationFailed { output: failed_output, non_stored_nested_jars }
+        matches!(err, ApplyError::VerificationFailed { output: failed_output, non_stored_nested_jars, .. }
             if failed_output == output
                 && non_stored_nested_jars.iter().any(|nested| nested.path == WAR_PROVIDED_JAR))
     );

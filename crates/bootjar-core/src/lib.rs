@@ -264,6 +264,7 @@ pub enum ApplyError {
     VerificationFailed {
         output: PathBuf,
         non_stored_nested_jars: Vec<NestedJarInfo>,
+        missing_contained_archives: Vec<String>,
     },
 }
 
@@ -343,6 +344,7 @@ impl fmt::Display for ApplyError {
             Self::VerificationFailed {
                 output,
                 non_stored_nested_jars,
+                missing_contained_archives,
             } => {
                 write!(
                     f,
@@ -354,6 +356,12 @@ impl fmt::Display for ApplyError {
                     write!(f, ": non-STORED nested jars")?;
                     for nested_jar in non_stored_nested_jars {
                         write!(f, " {}", nested_jar.path)?;
+                    }
+                }
+                if !missing_contained_archives.is_empty() {
+                    write!(f, ": missing Spring Boot contained archives")?;
+                    for path in missing_contained_archives {
+                        write!(f, " {path}")?;
                     }
                 }
 
@@ -850,6 +858,12 @@ pub fn apply_patch_plan(
         action: "read patch plan",
         source,
     })?;
+    let input_index =
+        build_jar_index(input_jar).map_err(|source| ApplyError::VerificationReadFailed {
+            output: input_jar.to_path_buf(),
+            source,
+        })?;
+    let expected_contained_archives = input_index.contained_archives.clone();
     let plan = parse_patch_plan(&plan_yaml)?;
     let replacements = resolve_replacements(&plan)?;
     rewrite_outer_jar_with_plan(input_jar, output_jar, replacements)?;
@@ -859,14 +873,32 @@ pub fn apply_patch_plan(
         source,
     })?;
 
-    if !report.is_success() {
+    let missing_contained_archives =
+        missing_expected_contained_archives(&expected_contained_archives, &report);
+    if !report.is_success() || !missing_contained_archives.is_empty() {
         return Err(ApplyError::VerificationFailed {
             output: output_jar.to_path_buf(),
             non_stored_nested_jars: report.non_stored_nested_jars,
+            missing_contained_archives,
         });
     }
 
     Ok(())
+}
+
+fn missing_expected_contained_archives(
+    expected: &[ContainedArchiveInfo],
+    report: &VerifyReport,
+) -> Vec<String> {
+    expected
+        .iter()
+        .filter(|expected_archive| {
+            !report.contained_archives.iter().any(|actual| {
+                actual.path == expected_archive.path && actual.layout == expected_archive.layout
+            })
+        })
+        .map(|archive| archive.path.clone())
+        .collect()
 }
 
 impl CandidateFile {
@@ -2531,6 +2563,129 @@ operations:
     }
 
     #[test]
+    fn apply_replaces_whole_contained_spring_boot_archive() {
+        let wrapper = zip_wrapper_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("service.jar");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.zip");
+        let nested = nested_jar_bytes(&[(
+            "com/acme/NewService.class",
+            CompressionMethod::Stored,
+            b"new-class",
+        )]);
+        let replacement_bytes = nested_jar_bytes(&[
+            (
+                "BOOT-INF/classes/extra.yml",
+                CompressionMethod::Stored,
+                b"extra: true",
+            ),
+            ("BOOT-INF/lib/new.jar", CompressionMethod::Stored, &nested),
+        ]);
+        write_input_file(&replacement, &replacement_bytes);
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: app/service.jar
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        apply_patch_plan(&wrapper, &plan, &output).unwrap();
+
+        assert_eq!(
+            read_nested_jar_entry(&output, "app/service.jar", "BOOT-INF/classes/extra.yml"),
+            b"extra: true"
+        );
+        let report = verify_jar(&output).unwrap();
+        assert!(report.is_success());
+        assert!(report
+            .contained_archives
+            .iter()
+            .any(|archive| archive.path == "app/service.jar"
+                && archive.layout == ArchiveLayout::SpringBootJar));
+    }
+
+    #[test]
+    fn apply_rejects_replacing_contained_spring_boot_archive_with_non_spring_jar() {
+        let wrapper = zip_wrapper_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("service.jar");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.zip");
+        let replacement_bytes = nested_jar_bytes(&[(
+            "README.txt",
+            CompressionMethod::Stored,
+            b"not a spring boot archive",
+        )]);
+        write_input_file(&replacement, &replacement_bytes);
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: app/service.jar
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        let err = apply_patch_plan(&wrapper, &plan, &output).unwrap_err();
+
+        assert!(
+            matches!(err, ApplyError::VerificationFailed { output: failed_output, missing_contained_archives, .. }
+                if failed_output == output && missing_contained_archives == vec!["app/service.jar".to_string()])
+        );
+        assert!(output.exists());
+    }
+
+    #[test]
+    fn apply_rejects_replacing_contained_spring_boot_archive_with_invalid_bytes() {
+        let wrapper = zip_wrapper_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("service.jar");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.zip");
+        write_input_file(&replacement, b"not a zip archive");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: app/service.jar
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        let err = apply_patch_plan(&wrapper, &plan, &output).unwrap_err();
+
+        assert!(
+            matches!(err, ApplyError::VerificationFailed { output: failed_output, missing_contained_archives, .. }
+                if failed_output == output && missing_contained_archives == vec!["app/service.jar".to_string()])
+        );
+        assert!(output.exists());
+    }
+
+    #[test]
     fn apply_fails_for_missing_replacement_source() {
         let jar = spring_boot_fixture_with_nested_entries();
         let dir = tempdir().unwrap();
@@ -2912,7 +3067,7 @@ operations:
         let err = apply_patch_plan(&jar, &plan, &output).unwrap_err();
 
         assert!(
-            matches!(err, ApplyError::VerificationFailed { output: failed_output, non_stored_nested_jars }
+            matches!(err, ApplyError::VerificationFailed { output: failed_output, non_stored_nested_jars, .. }
                 if failed_output == output
                     && non_stored_nested_jars.len() == 1
                     && non_stored_nested_jars[0].path == "BOOT-INF/lib/order.jar")
