@@ -234,3 +234,80 @@ fn match_fails_for_missing_input_path() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("match failed: could not read input path"));
 }
+
+#[test]
+fn match_prints_snippets_to_stdout() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    write_input_file(
+        &dir.path().join("BOOT-INF/classes/application.yml"),
+        b"server.port: 9090",
+    );
+
+    let output = command(&[
+        "match",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--inputs",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "snippets",
+    ]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("operations:\n"));
+    assert!(stdout.contains("  - replace-entry:\n"));
+    assert!(stdout.contains("      target: \"BOOT-INF/classes/application.yml\"\n"));
+    assert!(stdout.contains("      with: "));
+}
+
+#[test]
+fn match_writes_snippets_to_out_file() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    write_input_file(
+        &dir.path().join("BOOT-INF/classes/application.yml"),
+        b"server.port: 9090",
+    );
+    let out = dir.path().join("patch-snippets.yaml");
+
+    let output = command(&[
+        "match",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--inputs",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "snippets",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    let snippets = std::fs::read_to_string(out).unwrap();
+    assert!(snippets.contains("operations:\n"));
+    assert!(snippets.contains("  - replace-entry:\n"));
+}
+
+#[test]
+fn match_rejects_unknown_format() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    write_input_file(&dir.path().join("Missing.class"), b"replacement");
+
+    let output = command(&[
+        "match",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--inputs",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "xml",
+    ]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unknown match format: xml"));
+}

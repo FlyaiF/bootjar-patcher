@@ -62,14 +62,17 @@ fn main() {
 
             match bootjar_core::match_in_jar(&options.jar, &options.inputs) {
                 Ok(candidates) => {
-                    let yaml = candidates.to_yaml();
+                    let output = match options.format {
+                        MatchFormat::Candidates => candidates.to_yaml(),
+                        MatchFormat::Snippets => candidates.to_snippets(),
+                    };
                     if let Some(out) = options.out {
-                        if let Err(err) = std::fs::write(&out, yaml) {
+                        if let Err(err) = std::fs::write(&out, output) {
                             eprintln!("match failed: could not write {}: {err}", out.display());
                             process::exit(1);
                         }
                     } else {
-                        print!("{yaml}");
+                        print!("{output}");
                     }
                 }
                 Err(err) => {
@@ -96,19 +99,29 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  bootjar-patcher inspect <jar>");
     eprintln!("  bootjar-patcher find <jar> <query>");
-    eprintln!("  bootjar-patcher match --jar <jar> --inputs <path> [--out <file>]");
+    eprintln!(
+        "  bootjar-patcher match --jar <jar> --inputs <path> [--format candidates|snippets] [--out <file>]"
+    );
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct MatchOptions {
     jar: PathBuf,
     inputs: Vec<PathBuf>,
+    format: MatchFormat,
     out: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchFormat {
+    Candidates,
+    Snippets,
 }
 
 fn parse_match_options(args: Vec<String>) -> Result<MatchOptions, String> {
     let mut jar = None;
     let mut inputs = Vec::new();
+    let mut format = MatchFormat::Candidates;
     let mut out = None;
     let mut index = 0;
 
@@ -135,6 +148,17 @@ fn parse_match_options(args: Vec<String>) -> Result<MatchOptions, String> {
                     .ok_or_else(|| "--out requires a value".to_string())?;
                 out = Some(PathBuf::from(value));
             }
+            "--format" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--format requires a value".to_string())?;
+                format = match value.as_str() {
+                    "candidates" => MatchFormat::Candidates,
+                    "snippets" => MatchFormat::Snippets,
+                    other => return Err(format!("unknown match format: {other}")),
+                };
+            }
             unknown => return Err(format!("unknown match option: {unknown}")),
         }
         index += 1;
@@ -145,7 +169,12 @@ fn parse_match_options(args: Vec<String>) -> Result<MatchOptions, String> {
         return Err("match requires at least one --inputs path".to_string());
     }
 
-    Ok(MatchOptions { jar, inputs, out })
+    Ok(MatchOptions {
+        jar,
+        inputs,
+        format,
+        out,
+    })
 }
 
 fn print_inspect_report(report: &bootjar_core::InspectReport) {

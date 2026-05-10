@@ -453,6 +453,55 @@ impl CandidateFile {
 
         yaml
     }
+
+    pub fn to_snippets(&self) -> String {
+        let mut snippets = String::new();
+        snippets.push_str("# kind: patch-plan\n");
+        snippets.push_str("# version: 1\n");
+        snippets.push_str("operations:\n");
+
+        if self.matches.is_empty() {
+            snippets.push_str("#  []\n");
+            return snippets;
+        }
+
+        for input_match in &self.matches {
+            match input_match.status {
+                MatchStatus::Selected => {
+                    if let Some(candidate) = input_match.candidates.first() {
+                        snippets.push_str("  - replace-entry:\n");
+                        snippets.push_str("      target: ");
+                        snippets.push_str(&yaml_string(&candidate.target));
+                        snippets.push('\n');
+                        snippets.push_str("      with: ");
+                        snippets.push_str(&yaml_string(&input_match.input));
+                        snippets.push('\n');
+                    }
+                }
+                MatchStatus::NeedsSelection => {
+                    snippets.push_str("# needs-selection: ");
+                    snippets.push_str(&yaml_string(&input_match.input));
+                    snippets.push('\n');
+                    for candidate in &input_match.candidates {
+                        snippets.push_str("#  - replace-entry:\n");
+                        snippets.push_str("#      target: ");
+                        snippets.push_str(&yaml_string(&candidate.target));
+                        snippets.push('\n');
+                        snippets.push_str("#      with: ");
+                        snippets.push_str(&yaml_string(&input_match.input));
+                        snippets.push('\n');
+                    }
+                }
+                MatchStatus::NoMatch => {
+                    snippets.push_str("# no-match: ");
+                    snippets.push_str(&yaml_string(&input_match.input));
+                    snippets.push('\n');
+                }
+            }
+        }
+
+        snippets
+    }
 }
 
 impl JarIndex {
@@ -1099,6 +1148,73 @@ mod tests {
                 "          - \"exact relative path\"\n",
             )
         );
+    }
+
+    #[test]
+    fn renders_selected_match_as_patch_snippet() {
+        let candidates = CandidateFile {
+            source: "app.jar".to_string(),
+            matches: vec![InputMatch {
+                input: "./patch/BOOT-INF/classes/application.yml".to_string(),
+                status: MatchStatus::Selected,
+                candidates: vec![CandidateTarget {
+                    target: "BOOT-INF/classes/application.yml".to_string(),
+                    score: 100,
+                    reason: vec!["exact relative path".to_string()],
+                }],
+            }],
+        };
+
+        assert_eq!(
+            candidates.to_snippets(),
+            concat!(
+                "# kind: patch-plan\n",
+                "# version: 1\n",
+                "operations:\n",
+                "  - replace-entry:\n",
+                "      target: \"BOOT-INF/classes/application.yml\"\n",
+                "      with: \"./patch/BOOT-INF/classes/application.yml\"\n",
+            )
+        );
+    }
+
+    #[test]
+    fn renders_ambiguous_and_no_match_snippets_as_comments() {
+        let candidates = CandidateFile {
+            source: "app.jar".to_string(),
+            matches: vec![
+                InputMatch {
+                    input: "./patch/OrderCalculator.class".to_string(),
+                    status: MatchStatus::NeedsSelection,
+                    candidates: vec![
+                        CandidateTarget {
+                            target: "BOOT-INF/classes/com/acme/OrderCalculator.class".to_string(),
+                            score: 80,
+                            reason: vec!["same filename".to_string()],
+                        },
+                        CandidateTarget {
+                            target: "BOOT-INF/lib/order.jar!/com/acme/OrderCalculator.class"
+                                .to_string(),
+                            score: 80,
+                            reason: vec!["same filename".to_string()],
+                        },
+                    ],
+                },
+                InputMatch {
+                    input: "./patch/Missing.class".to_string(),
+                    status: MatchStatus::NoMatch,
+                    candidates: Vec::new(),
+                },
+            ],
+        };
+
+        let snippets = candidates.to_snippets();
+        assert!(snippets.contains("# needs-selection: \"./patch/OrderCalculator.class\"\n"));
+        assert!(snippets.contains(
+            "#      target: \"BOOT-INF/lib/order.jar!/com/acme/OrderCalculator.class\"\n"
+        ));
+        assert!(snippets.contains("# no-match: \"./patch/Missing.class\"\n"));
+        assert!(!snippets.lines().any(|line| line == "  - replace-entry:"));
     }
 
     #[test]
