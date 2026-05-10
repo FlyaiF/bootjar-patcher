@@ -100,6 +100,27 @@ fn main() {
                 }
             }
         }
+        Some("verify") => {
+            let path = args.next();
+            if path.is_none() {
+                eprintln!("Usage: bootjar-patcher verify <jar>");
+                process::exit(2);
+            }
+            let path = Path::new(path.as_ref().unwrap());
+
+            match bootjar_core::verify_jar(path) {
+                Ok(report) => {
+                    print_verify_report(&report);
+                    if !report.is_success() {
+                        process::exit(1);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("verify failed: {err}");
+                    process::exit(1);
+                }
+            }
+        }
         Some("help") | Some("-h") | Some("--help") | None => {
             print_usage();
             if command.is_none() {
@@ -122,6 +143,7 @@ fn print_usage() {
         "  bootjar-patcher match --jar <jar> --inputs <path> [--format candidates|snippets] [--out <file>]"
     );
     eprintln!("  bootjar-patcher apply --jar <jar> --plan <plan> --out <jar>");
+    eprintln!("  bootjar-patcher verify <jar>");
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -280,5 +302,40 @@ fn format_flag(value: bool) -> &'static str {
         "present"
     } else {
         "absent"
+    }
+}
+
+fn print_verify_report(report: &bootjar_core::VerifyReport) {
+    println!("Jar: {}", report.jar_path);
+    println!("Readable: {}", format_flag(report.readable));
+    println!("BOOT-INF/lib nested jars:");
+    if report.nested_jars.is_empty() {
+        println!("  (none)");
+    } else {
+        for nested in &report.nested_jars {
+            let status = if nested.is_stored {
+                "STORED"
+            } else {
+                "not STORED"
+            };
+            println!(
+                "  {} -> {} ({})",
+                nested.path, status, nested.compression_method
+            );
+        }
+    }
+
+    if report.non_stored_nested_jars.is_empty() {
+        println!("Nested jar storage: ok");
+    } else {
+        println!("Nested jar storage: failed");
+    }
+
+    if !report.signed_metadata.is_empty() {
+        println!("Warnings:");
+        println!("  signed jar metadata detected:");
+        for path in &report.signed_metadata {
+            println!("    {path}");
+        }
     }
 }

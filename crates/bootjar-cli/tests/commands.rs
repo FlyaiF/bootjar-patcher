@@ -509,3 +509,36 @@ matches: []
     assert!(stderr.contains("apply failed: candidates files are not reviewed patch plans"));
     assert!(!output_jar.exists());
 }
+
+#[test]
+fn verify_succeeds_for_stored_nested_jars() {
+    let jar = spring_boot_jar();
+    let output = command(&["verify", jar.to_str().unwrap()]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Readable: present"));
+    assert!(stdout.contains("BOOT-INF/lib/order.jar -> STORED (Stored)"));
+    assert!(stdout.contains("Nested jar storage: ok"));
+}
+
+#[test]
+fn verify_fails_for_compressed_nested_jar() {
+    let nested = nested_jar_bytes(&[(
+        "com/acme/OrderService.class",
+        CompressionMethod::Stored,
+        b"",
+    )]);
+    let jar = write_jar(&[(
+        "BOOT-INF/lib/order.jar",
+        CompressionMethod::Deflated,
+        &nested,
+    )]);
+
+    let output = command(&["verify", jar.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("BOOT-INF/lib/order.jar -> not STORED (Deflated)"));
+    assert!(stdout.contains("Nested jar storage: failed"));
+}

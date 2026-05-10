@@ -346,6 +346,21 @@ pub struct InspectReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyReport {
+    pub jar_path: String,
+    pub readable: bool,
+    pub nested_jars: Vec<NestedJarInfo>,
+    pub non_stored_nested_jars: Vec<NestedJarInfo>,
+    pub signed_metadata: Vec<String>,
+}
+
+impl VerifyReport {
+    pub fn is_success(&self) -> bool {
+        self.readable && self.non_stored_nested_jars.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindResult {
     pub archive_path: String,
 }
@@ -546,6 +561,29 @@ impl JarIndex {
 
         results
     }
+
+    pub fn verify_report(&self, path: &Path) -> VerifyReport {
+        let non_stored_nested_jars = self
+            .nested_jars
+            .iter()
+            .filter(|entry| !entry.is_stored)
+            .cloned()
+            .collect();
+        let signed_metadata = self
+            .entries
+            .iter()
+            .filter(|entry| is_signed_metadata_entry(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect();
+
+        VerifyReport {
+            jar_path: path.display().to_string(),
+            readable: true,
+            nested_jars: self.nested_jars.clone(),
+            non_stored_nested_jars,
+            signed_metadata,
+        }
+    }
 }
 
 pub fn inspect_jar(path: impl AsRef<Path>) -> Result<InspectReport, JarInspectError> {
@@ -558,6 +596,11 @@ pub fn find_in_jar(
     query: impl AsRef<str>,
 ) -> Result<Vec<FindResult>, JarInspectError> {
     Ok(build_jar_index(path.as_ref().to_path_buf())?.find(query.as_ref()))
+}
+
+pub fn verify_jar(path: impl AsRef<Path>) -> Result<VerifyReport, JarInspectError> {
+    let path_ref = path.as_ref();
+    Ok(build_jar_index(path_ref)?.verify_report(path_ref))
 }
 
 pub fn match_in_jar(
@@ -1190,6 +1233,20 @@ fn nested_jar_entry(path: &str) -> Option<&str> {
         return None;
     }
     Some(path)
+}
+
+fn is_signed_metadata_entry(path: &str) -> bool {
+    if !path.starts_with("META-INF/") {
+        return false;
+    }
+    let Some(file_name) = path_file_name(path) else {
+        return false;
+    };
+    let upper = file_name.to_ascii_uppercase();
+    upper.ends_with(".SF")
+        || upper.ends_with(".RSA")
+        || upper.ends_with(".DSA")
+        || upper.ends_with(".EC")
 }
 
 fn index_nested_jar_entries<R: Read>(
@@ -2064,6 +2121,72 @@ operations:
             matches!(err, ApplyError::InvalidReplacementNestedJar { path, .. } if path == replacement)
         );
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn verify_succeeds_for_stored_nested_jars() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let report = verify_jar(&jar).unwrap();
+
+        assert!(report.is_success());
+        assert_eq!(report.nested_jars.len(), 1);
+        assert!(report.non_stored_nested_jars.is_empty());
+        assert!(report.signed_metadata.is_empty());
+    }
+
+    #[test]
+    fn verify_fails_for_compressed_nested_jars() {
+        let nested = nested_jar_bytes(&[(
+            "com/acme/OrderService.class",
+            CompressionMethod::Stored,
+            b"",
+        )]);
+        let jar = write_jar(&[(
+            "BOOT-INF/lib/order.jar",
+            CompressionMethod::Deflated,
+            &nested,
+        )]);
+
+        let report = verify_jar(&jar).unwrap();
+
+        assert!(!report.is_success());
+        assert_eq!(report.non_stored_nested_jars.len(), 1);
+        assert_eq!(
+            report.non_stored_nested_jars[0].path,
+            "BOOT-INF/lib/order.jar"
+        );
+    }
+
+    #[test]
+    fn verify_warns_on_signed_metadata() {
+        let jar = write_jar(&[
+            (
+                "META-INF/APP.SF",
+                CompressionMethod::Stored,
+                b"Signature-Version: 1.0",
+            ),
+            ("META-INF/APP.RSA", CompressionMethod::Stored, b"signature"),
+            (
+                "BOOT-INF/lib/order.jar",
+                CompressionMethod::Stored,
+                &nested_jar_bytes(&[(
+                    "com/acme/OrderService.class",
+                    CompressionMethod::Stored,
+                    b"",
+                )]),
+            ),
+        ]);
+
+        let report = verify_jar(&jar).unwrap();
+
+        assert!(report.is_success());
+        assert_eq!(
+            report.signed_metadata,
+            vec![
+                "META-INF/APP.SF".to_string(),
+                "META-INF/APP.RSA".to_string()
+            ]
+        );
     }
 
     #[test]
