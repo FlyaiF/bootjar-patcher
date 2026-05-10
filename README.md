@@ -1,6 +1,6 @@
 # bootjar-patcher OpenSpec Starter
 
-This archive initializes a spec-driven project for `bootjar-patcher`: a cross-platform CLI plus reusable Rust core library for inspecting, discovering, planning, and applying patches to Spring Boot executable JAR and WAR archives.
+This archive initializes a spec-driven project for `bootjar-patcher`: a cross-platform CLI plus reusable Rust core library for inspecting, discovering, planning, and applying patches to Spring Boot executable JAR/WAR archives and plain ZIP distribution wrappers.
 
 ## Why this structure
 
@@ -21,6 +21,8 @@ Patch files at any supported level of a Spring Boot executable archive:
 - files inside nested jars using `!` syntax, e.g. `BOOT-INF/lib/a.jar!/com/acme/Foo.class`
 - `WEB-INF/classes/...` in executable WARs
 - nested WAR libraries under `WEB-INF/lib/*.jar` and `WEB-INF/lib-provided/*.jar`
+- wrapper files such as `config/runtime.yml`, `bin/start.sh`, and `templates/banner.txt`
+- files inside a fat jar wrapped by a ZIP, e.g. `app/service.jar!/BOOT-INF/classes/application.yml`
 
 Then rebuild the archive while preserving Spring Boot loader requirements.
 
@@ -40,6 +42,8 @@ Outer entries for Spring Boot nested libraries must be STORED/uncompressed in th
 - `WEB-INF/lib/*.jar` and `WEB-INF/lib-provided/*.jar` for executable WARs
 
 The nested jar contents themselves may remain compressed.
+
+ZIP wrapper entries that contain the Spring Boot JAR/WAR do not have to be STORED in the wrapper ZIP. The nested library invariant applies inside each contained Spring Boot archive.
 
 ## Real Spring Boot integration tests
 

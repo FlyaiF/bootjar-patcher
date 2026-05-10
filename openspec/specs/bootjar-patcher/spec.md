@@ -11,7 +11,7 @@ It supports direct patch execution and assistive discovery of candidate target p
 
 ### Input archive
 
-The Spring Boot executable JAR or WAR passed as input to the tool.
+The Spring Boot executable JAR/WAR or ZIP wrapper passed as input to the tool.
 
 ### Nested jar
 
@@ -21,7 +21,7 @@ for executable WARs.
 
 ### Archive path
 
-A string identifying either an outer archive entry or a nested jar entry.
+A string identifying either an outer archive entry or a chained nested archive entry.
 
 Outer archive path example:
 
@@ -33,6 +33,12 @@ Nested archive path example:
 
 ```text
 BOOT-INF/lib/order-module-1.4.2.jar!/com/acme/order/OrderCalculator.class
+```
+
+ZIP wrapper chained archive path example:
+
+```text
+app/service.jar!/BOOT-INF/lib/order-module-1.4.2.jar!/com/acme/order/OrderCalculator.class
 ```
 
 ### Candidate file
@@ -54,6 +60,7 @@ The `inspect` command MUST report the detected archive layout:
 
 - Spring Boot executable JAR
 - Spring Boot executable WAR
+- ZIP wrapper
 - unknown readable archive
 
 The `inspect` command MUST report whether the input appears to contain JAR layout
@@ -76,6 +83,8 @@ The `inspect` command MUST report whether the input appears to contain:
 The `inspect` command MUST report whether nested jar entries under supported nested
 library roots are stored uncompressed in the outer archive.
 
+The `inspect` command MUST report contained Spring Boot archives for ZIP wrappers.
+
 The `inspect` command MUST fail when the input cannot be opened as an archive.
 
 The `inspect` command MUST NOT fail only because the archive does not appear to be a
@@ -95,6 +104,14 @@ When the user runs `bootjar-patcher inspect app.war`
 Then the tool reports the Spring Boot WAR layout
 And the tool reports nested jar storage status for both WAR library roots
 
+#### Scenario: Inspect ZIP wrapper
+
+Given a readable ZIP containing `app/service.jar` with a Spring Boot JAR layout
+When the user runs `bootjar-patcher inspect dist.zip`
+Then the tool reports the ZIP wrapper layout
+And the tool reports `app/service.jar` as a contained Spring Boot JAR
+And the tool reports nested jar storage status for `app/service.jar`
+
 #### Scenario: Inspect readable non-Spring jar
 
 Given a readable jar without `BOOT-INF/classes` or `BOOT-INF/lib`
@@ -111,16 +128,21 @@ And the output explains that the archive could not be read
 
 ### Requirement: Address outer and nested entries
 
-The system MUST support archive paths for both outer entries and nested entries.
+The system MUST support archive paths for outer entries and chained nested entries.
 
-The system MUST parse `!` as the separator between the nested jar path and the path
-inside that nested jar.
+The system MUST parse `!` as the separator between archive path segments.
+
+The system MUST support direct entry paths such as `config/app.yml`.
+
+The system MUST support contained archive paths such as `app/service.jar!/BOOT-INF/classes/application.yml`.
+
+The system MUST support dependency archive paths such as `app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class`.
 
 The system MUST normalize user-provided filesystem separators to jar-style `/` where safe.
 
 The system MUST reject archive paths with absolute paths, Windows drive prefixes,
-empty path segments, `.`, `..`, empty outer paths, empty nested inner paths, or multiple
-nested separators.
+empty path segments, `.`, `..`, empty outer paths, empty nested inner paths, or empty
+archive segments.
 
 #### Scenario: Parse nested archive path
 
@@ -128,6 +150,13 @@ Given the path `BOOT-INF/lib/order-module.jar!/com/acme/OrderService.class`
 When the path is parsed
 Then the outer archive path is `BOOT-INF/lib/order-module.jar`
 And the inner path is `com/acme/OrderService.class`
+
+#### Scenario: Parse chained archive path
+
+Given the path `app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class`
+When the path is parsed
+Then the first archive segment is `app/service.jar`
+And the final archive segment is `com/acme/OrderService.class`
 
 #### Scenario: Normalize safe filesystem separators
 
@@ -146,7 +175,8 @@ And no archive path is produced
 
 The system MUST provide a `find` command.
 
-The `find` command MUST search both outer entries and nested entries by default.
+The `find` command MUST search wrapper entries, contained Spring Boot archive entries,
+and nested dependency entries by default.
 
 The `find` command MUST display matching archive paths using the same path syntax that
 patch plans accept.
@@ -164,6 +194,18 @@ The `find` command MUST fail when the input cannot be opened as an archive.
 Given an executable jar containing `BOOT-INF/lib/order.jar!/com/acme/OrderService.class`
 When the user runs `bootjar-patcher find app.jar OrderService.class`
 Then the output includes `BOOT-INF/lib/order.jar!/com/acme/OrderService.class`
+
+#### Scenario: Find wrapper configuration file
+
+Given a ZIP wrapper containing `config/runtime.yml`
+When the user runs `bootjar-patcher find dist.zip runtime.yml`
+Then the output includes `config/runtime.yml`
+
+#### Scenario: Find dependency entry inside contained archive
+
+Given a ZIP wrapper containing `app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class`
+When the user runs `bootjar-patcher find dist.zip OrderService.class`
+Then the output includes `app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class`
 
 #### Scenario: Find class in WAR nested jar
 
@@ -216,6 +258,12 @@ The `match` command MUST accept:
 The `match` command MUST scan the target archive and produce candidate target paths for
 the input files.
 
+The `match` command MUST include wrapper entries and chained contained archive entries
+as candidate targets.
+
+The `match` command MUST NOT infer a contained archive target from an unqualified
+`BOOT-INF/...` input path when the target archive is a ZIP wrapper.
+
 The `match` command MUST mark each input as one of:
 
 - `selected`
@@ -260,6 +308,22 @@ And the target WAR contains `WEB-INF/classes/application.yml`
 When the user runs `bootjar-patcher match --archive app.war --inputs ./patch`
 Then the result may be marked `selected`
 And the selected target is `WEB-INF/classes/application.yml`
+
+#### Scenario: Exact unique wrapper match
+
+Given an input file with relative path `config/runtime.yml`
+And the target ZIP wrapper contains `config/runtime.yml`
+When the user runs `bootjar-patcher match --archive dist.zip --inputs ./patch`
+Then the result may be marked `selected`
+And the selected target is `config/runtime.yml`
+
+#### Scenario: Exact unique chained wrapper match
+
+Given an input file with relative path `app/service.jar!/BOOT-INF/classes/application.yml`
+And the target ZIP wrapper contains `app/service.jar!/BOOT-INF/classes/application.yml`
+When the user runs `bootjar-patcher match --archive dist.zip --inputs ./patch`
+Then the result may be marked `selected`
+And the selected target is `app/service.jar!/BOOT-INF/classes/application.yml`
 
 #### Scenario: Reject legacy jar option
 
@@ -366,6 +430,17 @@ The `apply` command MUST fail when a replace target does not exist in the input 
 
 The `apply` command MUST reject the removed `--jar` option as unknown.
 
+The `apply` command MUST support `replace-entry` operations targeting ZIP wrapper entries.
+
+The `apply` command MUST support `replace-entry` operations targeting entries inside
+contained Spring Boot JAR/WAR archives using chained paths.
+
+The `apply` command MUST support `replace-entry` operations targeting nested dependency
+entries inside contained Spring Boot archives using chained paths.
+
+The `apply` command MUST preserve wrapper entry compression method, modified time, and
+Unix mode where available.
+
 #### Scenario: Apply reviewed patch plan
 
 Given an input archive and a reviewed patch plan with valid replace operations
@@ -402,6 +477,31 @@ And the replacement source file does not exist
 When the user runs `bootjar-patcher apply --archive app.jar --plan patch.yaml --out app-patched.jar`
 Then the command fails
 And the output explains that the replacement source file could not be read
+
+#### Scenario: Replace wrapper script
+
+Given a ZIP wrapper containing executable `bin/start.sh`
+And a patch plan targeting `bin/start.sh`
+When the patch plan is applied
+Then `bin/start.sh` in the output ZIP contains the replacement bytes
+And the output entry preserves executable Unix mode where available
+
+#### Scenario: Replace contained archive resource
+
+Given a ZIP wrapper containing `app/service.jar!/BOOT-INF/classes/application.yml`
+And a patch plan targeting `app/service.jar!/BOOT-INF/classes/application.yml`
+When the patch plan is applied
+Then the output ZIP contains a rewritten `app/service.jar`
+And `BOOT-INF/classes/application.yml` inside that JAR contains the replacement bytes
+
+#### Scenario: Replace dependency entry inside contained archive
+
+Given a ZIP wrapper containing `app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class`
+And a patch plan targeting `app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class`
+When the patch plan is applied
+Then the output ZIP contains a rewritten `app/service.jar`
+And `BOOT-INF/lib/order.jar` inside that JAR is STORED
+And `com/acme/OrderService.class` inside the dependency jar contains the replacement bytes
 
 ### Requirement: Replace entries under BOOT-INF/classes
 
@@ -548,6 +648,12 @@ The `verify` command MUST fail when the archive cannot be opened.
 
 The `verify` command MUST fail when any supported nested library entry is not STORED.
 
+For ZIP wrappers, the `verify` command MUST verify every contained Spring Boot JAR/WAR
+using the same nested library STORED rules.
+
+The `verify` command MUST NOT require contained Spring Boot archive entries to be
+STORED in the wrapper ZIP.
+
 #### Scenario: Verify stored nested jars
 
 Given a patched jar containing nested jars under `BOOT-INF/lib`
@@ -562,6 +668,13 @@ When the user runs `bootjar-patcher verify app-patched.war`
 Then the tool reports whether the WAR can be opened
 And the tool reports whether all WAR nested library entries are STORED
 
+#### Scenario: Verify valid ZIP wrapper
+
+Given a ZIP wrapper containing a Spring Boot JAR with STORED nested libraries
+When the user runs `bootjar-patcher verify dist.zip`
+Then the command succeeds
+And the output reports the contained Spring Boot archive nested libraries
+
 #### Scenario: Reject compressed nested jar
 
 Given a jar containing a compressed `BOOT-INF/lib/order.jar` outer entry
@@ -575,6 +688,13 @@ Given a WAR containing a compressed `WEB-INF/lib/order.jar` outer entry
 When the user runs `bootjar-patcher verify app.war`
 Then the command fails
 And the output identifies `WEB-INF/lib/order.jar` as not STORED
+
+#### Scenario: Reject ZIP wrapper with invalid contained archive
+
+Given a ZIP wrapper containing a Spring Boot JAR with compressed `BOOT-INF/lib/order.jar`
+When the user runs `bootjar-patcher verify dist.zip`
+Then the command fails
+And the output identifies `app/service.jar!/BOOT-INF/lib/order.jar` as not STORED
 
 #### Scenario: Warn on signed metadata
 
@@ -606,12 +726,15 @@ STORED in valid Spring Boot outputs.
 The integration tests MUST verify that nested jars under `WEB-INF/lib/*.jar` and
 `WEB-INF/lib-provided/*.jar` are STORED in valid Spring Boot WAR outputs.
 
+The integration tests MUST cover a ZIP wrapper containing the Maven-built executable
+JAR plus scripts, configuration, and templates.
+
 #### Scenario: Run real Spring Boot integration tests explicitly
 
 Given Java is available on `PATH`
 When the user runs `cargo test -p bootjar-spring-it -- --ignored`
 Then the test suite builds the fixture with Maven Wrapper
-And the tests exercise core behavior against the resulting executable JAR and WAR
+And the tests exercise core behavior against the resulting executable JAR, WAR, and ZIP wrapper
 
 #### Scenario: Keep default Rust tests Java-free
 
@@ -640,6 +763,14 @@ operations:
   - replace-entry:
       target: BOOT-INF/lib/common-module-2.7.0.jar
       with: ./patch/common-module-2.7.0-hotfix.jar
+
+  - replace-entry:
+      target: app/service.jar!/BOOT-INF/classes/application.yml
+      with: ./patch/application.yml
+
+  - replace-entry:
+      target: app/service.jar!/BOOT-INF/lib/order-module-1.4.2.jar!/com/acme/order/OrderCalculator.class
+      with: ./patch/OrderCalculator.class
 ```
 
 ## Candidate File Format

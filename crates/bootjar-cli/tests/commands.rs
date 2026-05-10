@@ -65,6 +65,41 @@ fn spring_boot_jar() -> PathBuf {
     ])
 }
 
+fn spring_boot_jar_bytes(compressed_nested: bool) -> Vec<u8> {
+    let nested_method = if compressed_nested {
+        CompressionMethod::Deflated
+    } else {
+        CompressionMethod::Stored
+    };
+    let nested = nested_jar_bytes(&[(
+        "com/acme/OrderService.class",
+        CompressionMethod::Deflated,
+        b"class-bytes",
+    )]);
+
+    nested_jar_bytes(&[
+        (
+            "BOOT-INF/classes/application.yml",
+            CompressionMethod::Stored,
+            b"server.port: 8080",
+        ),
+        ("BOOT-INF/lib/order.jar", nested_method, &nested),
+    ])
+}
+
+fn zip_wrapper() -> PathBuf {
+    let app = spring_boot_jar_bytes(false);
+    write_jar(&[
+        ("bin/start.sh", CompressionMethod::Stored, b"#!/bin/sh\n"),
+        (
+            "config/runtime.yml",
+            CompressionMethod::Deflated,
+            b"env: prod\n",
+        ),
+        ("app/service.jar", CompressionMethod::Deflated, &app),
+    ])
+}
+
 fn spring_boot_war() -> PathBuf {
     let nested = nested_jar_bytes(&[(
         "com/acme/OrderService.class",
@@ -135,6 +170,26 @@ fn read_nested_jar_entry(path: &std::path::Path, nested_jar: &str, inner_path: &
     bytes
 }
 
+fn read_double_nested_jar_entry(
+    path: &std::path::Path,
+    contained: &str,
+    nested_jar: &str,
+    inner_path: &str,
+) -> Vec<u8> {
+    let contained_bytes = read_jar_entry(path, contained);
+    let cursor = std::io::Cursor::new(contained_bytes);
+    let mut contained_archive = zip::ZipArchive::new(cursor).unwrap();
+    let mut nested = contained_archive.by_name(nested_jar).unwrap();
+    let mut nested_bytes = Vec::new();
+    nested.read_to_end(&mut nested_bytes).unwrap();
+    let cursor = std::io::Cursor::new(nested_bytes);
+    let mut nested_archive = zip::ZipArchive::new(cursor).unwrap();
+    let mut entry = nested_archive.by_name(inner_path).unwrap();
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
 fn jar_entry_compression(path: &std::path::Path, entry_name: &str) -> CompressionMethod {
     let file = std::fs::File::open(path).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -169,6 +224,19 @@ fn inspect_reports_spring_boot_war_layout() {
     assert!(stdout.contains("WEB-INF/lib-provided: present"));
     assert!(stdout.contains("WEB-INF/lib/order.jar -> STORED (Stored)"));
     assert!(stdout.contains("WEB-INF/lib-provided/container.jar -> STORED (Stored)"));
+}
+
+#[test]
+fn inspect_reports_zip_wrapper_layout() {
+    let wrapper = zip_wrapper();
+    let output = command(&["inspect", wrapper.to_str().unwrap()]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Layout: ZIP wrapper"));
+    assert!(stdout.contains("app/service.jar!/BOOT-INF/lib/order.jar -> STORED (Stored)"));
+    assert!(stdout.contains("Contained archives:"));
+    assert!(stdout.contains("app/service.jar -> Spring Boot JAR"));
 }
 
 #[test]
@@ -222,6 +290,25 @@ fn find_prints_outer_path_match() {
 }
 
 #[test]
+fn find_prints_wrapper_and_chained_matches() {
+    let wrapper = zip_wrapper();
+    let output = command(&["find", wrapper.to_str().unwrap(), "runtime.yml"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "config/runtime.yml\n"
+    );
+
+    let output = command(&["find", wrapper.to_str().unwrap(), "OrderService.class"]);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class\n"
+    );
+}
+
+#[test]
 fn find_succeeds_with_empty_output_for_no_match() {
     let jar = spring_boot_jar();
     let output = command(&["find", jar.to_str().unwrap(), "Missing.class"]);
@@ -263,6 +350,31 @@ fn match_prints_candidates_yaml_to_stdout() {
     assert!(stdout.contains("status: selected\n"));
     assert!(stdout.contains("target: \"BOOT-INF/classes/application.yml\""));
     assert!(stdout.contains("- \"exact relative path\""));
+}
+
+#[test]
+fn match_prints_wrapper_chained_candidates() {
+    let wrapper = zip_wrapper();
+    let dir = tempdir().unwrap();
+    write_input_file(&dir.path().join("config/runtime.yml"), b"env: test\n");
+    write_input_file(
+        &dir.path()
+            .join("app/service.jar!/BOOT-INF/classes/application.yml"),
+        b"server.port: 9090",
+    );
+
+    let output = command(&[
+        "match",
+        "--archive",
+        wrapper.to_str().unwrap(),
+        "--inputs",
+        dir.path().to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("target: \"config/runtime.yml\""));
+    assert!(stdout.contains("target: \"app/service.jar!/BOOT-INF/classes/application.yml\""));
 }
 
 #[test]
@@ -668,6 +780,62 @@ operations:
 }
 
 #[test]
+fn apply_replaces_wrapper_and_chained_entries() {
+    let wrapper = zip_wrapper();
+    let dir = tempdir().unwrap();
+    let config_replacement = dir.path().join("runtime.yml");
+    let class_replacement = dir.path().join("OrderService.class");
+    let plan = dir.path().join("patch-plan.yaml");
+    let output_zip = dir.path().join("dist-patched.zip");
+    write_input_file(&config_replacement, b"env: patched\n");
+    write_input_file(&class_replacement, b"patched-class");
+    std::fs::write(
+        &plan,
+        format!(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: config/runtime.yml
+      with: "{}"
+  - replace-entry:
+      target: app/service.jar!/BOOT-INF/lib/order.jar!/com/acme/OrderService.class
+      with: "{}"
+"#,
+            config_replacement.display(),
+            class_replacement.display()
+        ),
+    )
+    .unwrap();
+
+    let output = command(&[
+        "apply",
+        "--archive",
+        wrapper.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--out",
+        output_zip.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        read_jar_entry(&output_zip, "config/runtime.yml"),
+        b"env: patched\n"
+    );
+    assert_eq!(
+        read_double_nested_jar_entry(
+            &output_zip,
+            "app/service.jar",
+            "BOOT-INF/lib/order.jar",
+            "com/acme/OrderService.class"
+        ),
+        b"patched-class"
+    );
+}
+
+#[test]
 fn apply_rejects_legacy_jar_option() {
     let jar = spring_boot_jar();
     let dir = tempdir().unwrap();
@@ -768,6 +936,18 @@ fn verify_succeeds_for_stored_nested_jars() {
 }
 
 #[test]
+fn verify_succeeds_for_zip_wrapper() {
+    let wrapper = zip_wrapper();
+    let output = command(&["verify", wrapper.to_str().unwrap()]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("app/service.jar!/BOOT-INF/lib/order.jar -> STORED (Stored)"));
+    assert!(stdout.contains("Nested jar storage: ok"));
+    assert!(stdout.contains("app/service.jar -> Spring Boot JAR"));
+}
+
+#[test]
 fn verify_fails_for_compressed_nested_jar() {
     let nested = nested_jar_bytes(&[(
         "com/acme/OrderService.class",
@@ -813,5 +993,18 @@ fn verify_fails_for_compressed_war_nested_jar() {
     assert!(!output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("WEB-INF/lib/order.jar -> not STORED (Deflated)"));
+    assert!(stdout.contains("Nested jar storage: failed"));
+}
+
+#[test]
+fn verify_fails_for_zip_wrapper_with_compressed_contained_nested_jar() {
+    let app = spring_boot_jar_bytes(true);
+    let wrapper = write_jar(&[("app/service.jar", CompressionMethod::Deflated, &app)]);
+
+    let output = command(&["verify", wrapper.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("app/service.jar!/BOOT-INF/lib/order.jar -> not STORED (Deflated)"));
     assert!(stdout.contains("Nested jar storage: failed"));
 }

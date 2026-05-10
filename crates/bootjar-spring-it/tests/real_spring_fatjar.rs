@@ -96,6 +96,26 @@ fn read_nested_jar_entry(path: &Path, nested_jar: &str, inner_path: &str) -> Vec
     bytes
 }
 
+fn read_double_nested_jar_entry(
+    path: &Path,
+    contained_archive: &str,
+    nested_jar: &str,
+    inner_path: &str,
+) -> Vec<u8> {
+    let contained_bytes = read_jar_entry(path, contained_archive);
+    let cursor = std::io::Cursor::new(contained_bytes);
+    let mut contained = zip::ZipArchive::new(cursor).unwrap();
+    let mut nested = contained.by_name(nested_jar).unwrap();
+    let mut nested_bytes = Vec::new();
+    nested.read_to_end(&mut nested_bytes).unwrap();
+    let cursor = std::io::Cursor::new(nested_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).unwrap();
+    let mut entry = archive.by_name(inner_path).unwrap();
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
 fn jar_entry_compression(path: &Path, entry_name: &str) -> CompressionMethod {
     let file = File::open(path).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -122,6 +142,28 @@ fn write_patch_plan(path: &Path, operations: &[(&str, &Path)]) {
         yaml.push_str("\"\n");
     }
     fs::write(path, yaml).unwrap();
+}
+
+fn write_zip_wrapper(path: &Path, contained_jar: &Path) {
+    let output = File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(output);
+    let script_options = FileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .unix_permissions(0o755);
+    zip.start_file("bin/start.sh", script_options).unwrap();
+    zip.write_all(b"#!/bin/sh\njava -jar app/service.jar\n")
+        .unwrap();
+
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    zip.start_file("config/runtime.yml", options).unwrap();
+    zip.write_all(b"env: prod\n").unwrap();
+    zip.start_file("templates/banner.txt", options).unwrap();
+    zip.write_all(b"real-wrapper\n").unwrap();
+
+    let app_options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    zip.start_file("app/service.jar", app_options).unwrap();
+    zip.write_all(&fs::read(contained_jar).unwrap()).unwrap();
+    zip.finish().unwrap();
 }
 
 fn copy_with_compressed_nested_jar(input: &Path, output: &Path, nested_target: &str) {
@@ -410,6 +452,95 @@ fn find_match_apply_and_verify_real_spring_boot_war() {
     assert_eq!(
         jar_entry_compression(&output, WAR_PROVIDED_JAR),
         CompressionMethod::Stored
+    );
+    assert!(verify_jar(&output).unwrap().is_success());
+}
+
+#[test]
+#[ignore]
+fn find_match_apply_and_verify_real_zip_wrapper() {
+    let jar = real_spring_jar();
+    let dir = tempdir().unwrap();
+    let wrapper = dir.path().join("dist.zip");
+    write_zip_wrapper(&wrapper, jar);
+
+    let inspect = inspect_jar(&wrapper).unwrap();
+    assert_eq!(inspect.layout, ArchiveLayout::ZipWrapper);
+    assert!(inspect
+        .contained_archives
+        .iter()
+        .any(|archive| archive.path == "app/service.jar"));
+    assert!(inspect.nested_jars.iter().any(|nested| nested.path
+        == format!("app/service.jar!/{LIB_ONE_JAR}")
+        && nested.is_stored));
+
+    let runtime_matches = find_in_jar(&wrapper, "runtime.yml").unwrap();
+    assert!(runtime_matches
+        .iter()
+        .any(|result| result.archive_path == "config/runtime.yml"));
+
+    let order_matches = find_in_jar(&wrapper, "OrderService.class").unwrap();
+    assert!(order_matches.iter().any(|result| {
+        result.archive_path == format!("app/service.jar!/{LIB_ONE_JAR}!/{ORDER_CLASS}")
+    }));
+
+    let patch_root = dir.path().join("patch");
+    let runtime_input = patch_root.join("config/runtime.yml");
+    let app_input = patch_root.join("app/service.jar!/BOOT-INF/classes/application.yml");
+    write_file(&runtime_input, b"env: patched\n");
+    write_file(&app_input, b"fixture:\n  message: wrapper\n");
+    let candidates = match_in_jar(&wrapper, &[patch_root.clone()]).unwrap();
+    assert!(candidates.matches.iter().any(|input| {
+        input.status == MatchStatus::Selected
+            && input
+                .candidates
+                .iter()
+                .any(|candidate| candidate.target == "config/runtime.yml")
+    }));
+    assert!(candidates.matches.iter().any(|input| {
+        input.status == MatchStatus::Selected
+            && input.candidates.iter().any(|candidate| {
+                candidate.target == "app/service.jar!/BOOT-INF/classes/application.yml"
+            })
+    }));
+
+    let class_replacement = dir.path().join("OrderService.class");
+    write_file(
+        &class_replacement,
+        &read_nested_jar_entry(jar, LIB_TWO_JAR, INVENTORY_CLASS),
+    );
+    let nested_target = format!("app/service.jar!/{LIB_ONE_JAR}!/{ORDER_CLASS}");
+    let plan = dir.path().join("wrapper-plan.yaml");
+    write_patch_plan(
+        &plan,
+        &[
+            ("config/runtime.yml", &runtime_input),
+            (
+                "app/service.jar!/BOOT-INF/classes/application.yml",
+                &app_input,
+            ),
+            (&nested_target, &class_replacement),
+        ],
+    );
+    let output = dir.path().join("patched-dist.zip");
+
+    apply_patch_plan(&wrapper, &plan, &output).unwrap();
+
+    assert_eq!(
+        read_jar_entry(&output, "config/runtime.yml"),
+        b"env: patched\n"
+    );
+    assert_eq!(
+        read_nested_jar_entry(
+            &output,
+            "app/service.jar",
+            "BOOT-INF/classes/application.yml"
+        ),
+        b"fixture:\n  message: wrapper\n"
+    );
+    assert_eq!(
+        read_double_nested_jar_entry(&output, "app/service.jar", LIB_ONE_JAR, ORDER_CLASS),
+        read_nested_jar_entry(jar, LIB_TWO_JAR, INVENTORY_CLASS)
     );
     assert!(verify_jar(&output).unwrap().is_success());
 }

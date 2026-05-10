@@ -293,19 +293,31 @@ fn print_inspect_report(report: &bootjar_core::InspectReport) {
     println!("Nested jars:");
     if report.nested_jars.is_empty() {
         println!("  (none)");
-        return;
+    } else {
+        for nested in &report.nested_jars {
+            let status = if nested.is_stored {
+                "STORED"
+            } else {
+                "compressed"
+            };
+            println!(
+                "  {} -> {} ({})",
+                nested.path, status, nested.compression_method
+            );
+        }
     }
 
-    for nested in &report.nested_jars {
-        let status = if nested.is_stored {
-            "STORED"
-        } else {
-            "compressed"
-        };
-        println!(
-            "  {} -> {} ({})",
-            nested.path, status, nested.compression_method
-        );
+    println!("Contained archives:");
+    if report.contained_archives.is_empty() {
+        println!("  (none)");
+    } else {
+        for contained in &report.contained_archives {
+            println!(
+                "  {} -> {}",
+                contained.path,
+                format_layout(contained.layout)
+            );
+        }
     }
 }
 
@@ -313,6 +325,7 @@ fn format_layout(layout: bootjar_core::ArchiveLayout) -> &'static str {
     match layout {
         bootjar_core::ArchiveLayout::SpringBootJar => "Spring Boot JAR",
         bootjar_core::ArchiveLayout::SpringBootWar => "Spring Boot WAR",
+        bootjar_core::ArchiveLayout::ZipWrapper => "ZIP wrapper",
         bootjar_core::ArchiveLayout::Unknown => "unknown",
     }
 }
@@ -356,6 +369,17 @@ fn print_verify_report(report: &bootjar_core::VerifyReport) {
         println!("  signed jar metadata detected:");
         for path in &report.signed_metadata {
             println!("    {path}");
+        }
+    }
+
+    if !report.contained_archives.is_empty() {
+        println!("Contained archives:");
+        for contained in &report.contained_archives {
+            println!(
+                "  {} -> {}",
+                contained.path,
+                format_layout(contained.layout)
+            );
         }
     }
 }
