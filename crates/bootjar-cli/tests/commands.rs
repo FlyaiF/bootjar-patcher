@@ -93,6 +93,16 @@ fn read_jar_entry(path: &std::path::Path, entry_name: &str) -> Vec<u8> {
     bytes
 }
 
+fn read_nested_jar_entry(path: &std::path::Path, nested_jar: &str, inner_path: &str) -> Vec<u8> {
+    let nested_bytes = read_jar_entry(path, nested_jar);
+    let cursor = std::io::Cursor::new(nested_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).unwrap();
+    let mut entry = archive.by_name(inner_path).unwrap();
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
 #[test]
 fn inspect_reports_spring_boot_layout() {
     let jar = spring_boot_jar();
@@ -363,6 +373,51 @@ operations:
     assert_eq!(
         read_jar_entry(&jar, "BOOT-INF/classes/application.yml"),
         b"server.port: 8080"
+    );
+}
+
+#[test]
+fn apply_replaces_nested_entry() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    let replacement = dir.path().join("OrderService.class");
+    let plan = dir.path().join("patch-plan.yaml");
+    let output_jar = dir.path().join("app-patched.jar");
+    write_input_file(&replacement, b"patched-class-bytes");
+    std::fs::write(
+        &plan,
+        format!(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/lib/order.jar!/com/acme/OrderService.class
+      with: "{}"
+"#,
+            replacement.display()
+        ),
+    )
+    .unwrap();
+
+    let output = command(&[
+        "apply",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--out",
+        output_jar.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        read_nested_jar_entry(
+            &output_jar,
+            "BOOT-INF/lib/order.jar",
+            "com/acme/OrderService.class"
+        ),
+        b"patched-class-bytes"
     );
 }
 

@@ -296,9 +296,6 @@ The `apply` command MUST fail when a replacement source file does not exist.
 
 The `apply` command MUST fail when a replace target does not exist in the input jar.
 
-The `apply` command MUST fail when a replace target uses nested archive path syntax
-until nested replacement is implemented.
-
 #### Scenario: Apply reviewed patch plan
 
 Given an input jar and a reviewed patch plan with valid replace operations
@@ -350,6 +347,10 @@ jar and then write the nested jar back into the outer jar.
 
 The system MUST write the outer `BOOT-INF/lib/*.jar` entry as STORED.
 
+The system MUST fail when the nested jar target does not exist in the outer jar.
+
+The system MUST fail when the inner target does not exist in the nested jar.
+
 #### Scenario: Replace nested jar entry
 
 Given a patch plan targeting `BOOT-INF/lib/order.jar!/com/acme/OrderService.class`
@@ -357,6 +358,22 @@ And the replacement source file exists
 When the patch plan is applied
 Then `com/acme/OrderService.class` inside `BOOT-INF/lib/order.jar` contains the replacement bytes
 And the outer `BOOT-INF/lib/order.jar` entry is STORED
+
+#### Scenario: Reject missing nested jar
+
+Given a patch plan targeting `BOOT-INF/lib/missing.jar!/com/acme/OrderService.class`
+And the replacement source file exists
+When the patch plan is applied
+Then the command fails
+And the output explains that the nested jar target does not exist
+
+#### Scenario: Reject missing nested entry
+
+Given a patch plan targeting `BOOT-INF/lib/order.jar!/com/acme/Missing.class`
+And the replacement source file exists
+When the patch plan is applied
+Then the command fails
+And the output explains that the nested replace target does not exist
 
 ### Requirement: Replace whole nested jars
 

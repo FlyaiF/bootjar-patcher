@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -213,9 +213,17 @@ pub enum ApplyError {
         target: String,
         source: ArchivePathParseError,
     },
-    UnsupportedNestedTarget(String),
     MissingReplacementSource(PathBuf),
     MissingTarget(String),
+    MissingNestedJar(String),
+    MissingNestedTarget {
+        outer_jar: String,
+        inner_path: String,
+    },
+    InvalidNestedJar {
+        outer_jar: String,
+        source: ZipError,
+    },
     DuplicateTarget(String),
 }
 
@@ -244,9 +252,6 @@ impl fmt::Display for ApplyError {
             Self::InvalidTarget { target, source } => {
                 write!(f, "invalid replace target {target}: {source}")
             }
-            Self::UnsupportedNestedTarget(target) => {
-                write!(f, "nested replace target is not supported yet: {target}")
-            }
             Self::MissingReplacementSource(path) => {
                 write!(
                     f,
@@ -256,6 +261,21 @@ impl fmt::Display for ApplyError {
             }
             Self::MissingTarget(target) => {
                 write!(f, "replace target does not exist in input jar: {target}")
+            }
+            Self::MissingNestedJar(target) => {
+                write!(f, "nested jar target does not exist in input jar: {target}")
+            }
+            Self::MissingNestedTarget {
+                outer_jar,
+                inner_path,
+            } => {
+                write!(
+                    f,
+                    "nested replace target does not exist in {outer_jar}: {inner_path}"
+                )
+            }
+            Self::InvalidNestedJar { outer_jar, source } => {
+                write!(f, "nested jar is not readable {outer_jar}: {source}")
             }
             Self::DuplicateTarget(target) => {
                 write!(f, "duplicate replace target in patch plan: {target}")
@@ -403,6 +423,18 @@ struct RawReplaceEntry {
     source: PathBuf,
 }
 
+#[derive(Debug)]
+struct ResolvedReplacement {
+    target: ArchivePath,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct ReplacementBytes {
+    bytes: Vec<u8>,
+    compression_method: Option<CompressionMethod>,
+}
+
 pub fn build_jar_index(path: impl Into<PathBuf>) -> Result<JarIndex, JarInspectError> {
     let path = path.into();
     let file = File::open(&path)?;
@@ -544,15 +576,10 @@ pub fn parse_patch_plan(yaml: &str) -> Result<PatchPlan, ApplyError> {
         let replace_entry = raw_operation
             .replace_entry
             .ok_or(ApplyError::UnsupportedOperation)?;
-        let archive_path = ArchivePath::parse(&replace_entry.target).map_err(|source| {
-            ApplyError::InvalidTarget {
-                target: replace_entry.target.clone(),
-                source,
-            }
+        ArchivePath::parse(&replace_entry.target).map_err(|source| ApplyError::InvalidTarget {
+            target: replace_entry.target.clone(),
+            source,
         })?;
-        if matches!(archive_path, ArchivePath::Nested { .. }) {
-            return Err(ApplyError::UnsupportedNestedTarget(replace_entry.target));
-        }
         if !seen_targets.insert(replace_entry.target.clone()) {
             return Err(ApplyError::DuplicateTarget(replace_entry.target));
         }
@@ -581,8 +608,8 @@ pub fn apply_patch_plan(
         source,
     })?;
     let plan = parse_patch_plan(&plan_yaml)?;
-    let replacements = read_replacements(&plan)?;
-    rewrite_outer_jar(input_jar, output_jar, replacements)
+    let replacements = resolve_replacements(&plan)?;
+    rewrite_outer_jar_with_plan(input_jar, output_jar, replacements)
 }
 
 impl CandidateFile {
@@ -853,20 +880,25 @@ fn yaml_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn read_replacements(plan: &PatchPlan) -> Result<BTreeMap<String, Vec<u8>>, ApplyError> {
-    let mut replacements = BTreeMap::new();
+fn resolve_replacements(plan: &PatchPlan) -> Result<Vec<ResolvedReplacement>, ApplyError> {
+    let mut replacements = Vec::with_capacity(plan.operations.len());
     for operation in &plan.operations {
         let bytes = std::fs::read(&operation.source)
             .map_err(|_| ApplyError::MissingReplacementSource(operation.source.clone()))?;
-        replacements.insert(operation.target.clone(), bytes);
+        let target =
+            ArchivePath::parse(&operation.target).map_err(|source| ApplyError::InvalidTarget {
+                target: operation.target.clone(),
+                source,
+            })?;
+        replacements.push(ResolvedReplacement { target, bytes });
     }
     Ok(replacements)
 }
 
-fn rewrite_outer_jar(
+fn rewrite_outer_jar_with_replacements(
     input_jar: &Path,
     output_jar: &Path,
-    mut replacements: BTreeMap<String, Vec<u8>>,
+    mut replacements: BTreeMap<String, ReplacementBytes>,
 ) -> Result<(), ApplyError> {
     let input = File::open(input_jar).map_err(|source| ApplyError::Io {
         path: input_jar.to_path_buf(),
@@ -909,14 +941,22 @@ fn rewrite_outer_jar(
             continue;
         }
 
-        writer.start_file(&path, options)?;
-        if let Some(bytes) = replacements.remove(&path) {
-            writer.write_all(&bytes).map_err(|source| ApplyError::Io {
-                path: output_jar.to_path_buf(),
-                action: "write output jar",
-                source,
-            })?;
+        if let Some(replacement) = replacements.remove(&path) {
+            let options = if let Some(method) = replacement.compression_method {
+                options.compression_method(method)
+            } else {
+                options
+            };
+            writer.start_file(&path, options)?;
+            writer
+                .write_all(&replacement.bytes)
+                .map_err(|source| ApplyError::Io {
+                    path: output_jar.to_path_buf(),
+                    action: "write output jar",
+                    source,
+                })?;
         } else {
+            writer.start_file(&path, options)?;
             io::copy(&mut entry, &mut writer).map_err(|source| ApplyError::Io {
                 path: output_jar.to_path_buf(),
                 action: "write output jar",
@@ -927,6 +967,162 @@ fn rewrite_outer_jar(
 
     writer.finish()?;
     Ok(())
+}
+
+fn rewrite_outer_jar_with_plan(
+    input_jar: &Path,
+    output_jar: &Path,
+    resolved: Vec<ResolvedReplacement>,
+) -> Result<(), ApplyError> {
+    let mut outer_replacements = BTreeMap::new();
+    let mut nested_replacements: BTreeMap<String, BTreeMap<String, Vec<u8>>> = BTreeMap::new();
+
+    for replacement in resolved {
+        match replacement.target {
+            ArchivePath::Outer { path } => {
+                outer_replacements.insert(
+                    path,
+                    ReplacementBytes {
+                        bytes: replacement.bytes,
+                        compression_method: None,
+                    },
+                );
+            }
+            ArchivePath::Nested {
+                outer_jar,
+                inner_path,
+            } => {
+                nested_replacements
+                    .entry(outer_jar)
+                    .or_default()
+                    .insert(inner_path, replacement.bytes);
+            }
+        }
+    }
+
+    if !nested_replacements.is_empty() {
+        let input = File::open(input_jar).map_err(|source| ApplyError::Io {
+            path: input_jar.to_path_buf(),
+            action: "read input jar",
+            source,
+        })?;
+        let mut archive = zip::ZipArchive::new(input)?;
+        for (outer_jar, inner_replacements) in nested_replacements {
+            let nested_bytes = read_entry_bytes_by_path(&mut archive, &outer_jar)?
+                .ok_or_else(|| ApplyError::MissingNestedJar(outer_jar.clone()))?;
+            let rewritten = rewrite_nested_jar(&outer_jar, nested_bytes, inner_replacements)?;
+            outer_replacements.insert(
+                outer_jar,
+                ReplacementBytes {
+                    bytes: rewritten,
+                    compression_method: Some(CompressionMethod::Stored),
+                },
+            );
+        }
+    }
+
+    rewrite_outer_jar_with_replacements(input_jar, output_jar, outer_replacements)
+}
+
+fn read_entry_bytes_by_path<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    target: &str,
+) -> Result<Option<Vec<u8>>, ApplyError> {
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        if entry.is_dir() {
+            continue;
+        }
+        if normalize_entry_name(entry.name()) == target {
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(|source| ApplyError::Io {
+                    path: PathBuf::from(target),
+                    action: "read jar entry",
+                    source,
+                })?;
+            return Ok(Some(bytes));
+        }
+    }
+
+    Ok(None)
+}
+
+fn rewrite_nested_jar(
+    outer_jar: &str,
+    nested_bytes: Vec<u8>,
+    mut replacements: BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<u8>, ApplyError> {
+    let cursor = Cursor::new(nested_bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|source| ApplyError::InvalidNestedJar {
+            outer_jar: outer_jar.to_string(),
+            source,
+        })?;
+
+    let mut existing_paths = BTreeSet::new();
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|source| ApplyError::InvalidNestedJar {
+                outer_jar: outer_jar.to_string(),
+                source,
+            })?;
+        if !entry.is_dir() {
+            existing_paths.insert(normalize_entry_name(entry.name()));
+        }
+    }
+    for target in replacements.keys() {
+        if !existing_paths.contains(target) {
+            return Err(ApplyError::MissingNestedTarget {
+                outer_jar: outer_jar.to_string(),
+                inner_path: target.clone(),
+            });
+        }
+    }
+
+    let output = Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(output);
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|source| ApplyError::InvalidNestedJar {
+                outer_jar: outer_jar.to_string(),
+                source,
+            })?;
+        let path = normalize_entry_name(entry.name());
+        let mut options = FileOptions::default()
+            .compression_method(entry.compression())
+            .last_modified_time(entry.last_modified());
+        if let Some(mode) = entry.unix_mode() {
+            options = options.unix_permissions(mode);
+        }
+
+        if entry.is_dir() {
+            writer.add_directory(&path, options)?;
+            continue;
+        }
+
+        writer.start_file(&path, options)?;
+        if let Some(bytes) = replacements.remove(&path) {
+            writer.write_all(&bytes).map_err(|source| ApplyError::Io {
+                path: PathBuf::from(outer_jar),
+                action: "write nested jar",
+                source,
+            })?;
+        } else {
+            io::copy(&mut entry, &mut writer).map_err(|source| ApplyError::Io {
+                path: PathBuf::from(outer_jar),
+                action: "write nested jar",
+                source,
+            })?;
+        }
+    }
+
+    let output = writer.finish()?;
+    Ok(output.into_inner())
 }
 
 fn is_boot_inf_classes_entry(path: &str) -> bool {
@@ -1120,6 +1316,23 @@ mod tests {
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
         bytes
+    }
+
+    fn read_nested_jar_entry(path: &Path, nested_jar: &str, inner_path: &str) -> Vec<u8> {
+        let nested_bytes = read_jar_entry(path, nested_jar);
+        let cursor = std::io::Cursor::new(nested_bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let mut entry = archive.by_name(inner_path).unwrap();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
+    fn jar_entry_compression(path: &Path, entry_name: &str) -> CompressionMethod {
+        let file = File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let entry = archive.by_name(entry_name).unwrap();
+        entry.compression()
     }
 
     #[test]
@@ -1505,6 +1718,29 @@ operations:
     }
 
     #[test]
+    fn parses_patch_plan_nested_replace_operations() {
+        let plan = parse_patch_plan(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/lib/order.jar!/com/acme/OrderService.class
+      with: ./patch/OrderService.class
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.operations[0],
+            ReplaceOperation {
+                target: "BOOT-INF/lib/order.jar!/com/acme/OrderService.class".to_string(),
+                source: PathBuf::from("./patch/OrderService.class"),
+            }
+        );
+    }
+
+    #[test]
     fn rejects_candidates_as_patch_plan() {
         let err = parse_patch_plan(
             r#"
@@ -1620,12 +1856,17 @@ operations:
     }
 
     #[test]
-    fn apply_rejects_nested_targets_for_this_slice() {
+    fn apply_replaces_nested_jar_entry_and_stores_outer_entry() {
+        let jar = spring_boot_fixture_with_nested_entries();
         let dir = tempdir().unwrap();
         let replacement = dir.path().join("OrderService.class");
-        write_input_file(&replacement, b"class-bytes");
-        let err = parse_patch_plan(&format!(
-            r#"
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        write_input_file(&replacement, b"patched-class-bytes");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
 kind: patch-plan
 version: 1
 operations:
@@ -1633,15 +1874,151 @@ operations:
       target: BOOT-INF/lib/order.jar!/com/acme/OrderService.class
       with: "{}"
 "#,
-            replacement.display()
-        ))
-        .unwrap_err();
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        apply_patch_plan(&jar, &plan, &output).unwrap();
+
+        assert_eq!(
+            read_nested_jar_entry(
+                &output,
+                "BOOT-INF/lib/order.jar",
+                "com/acme/OrderService.class"
+            ),
+            b"patched-class-bytes"
+        );
+        assert_eq!(
+            read_nested_jar_entry(
+                &output,
+                "BOOT-INF/lib/order.jar",
+                "com/acme/config/order.yml"
+            ),
+            b"enabled: true"
+        );
+        assert_eq!(
+            jar_entry_compression(&output, "BOOT-INF/lib/order.jar"),
+            CompressionMethod::Stored
+        );
+    }
+
+    #[test]
+    fn apply_groups_multiple_operations_in_same_nested_jar() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let class_replacement = dir.path().join("OrderService.class");
+        let config_replacement = dir.path().join("order.yml");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        write_input_file(&class_replacement, b"patched-class-bytes");
+        write_input_file(&config_replacement, b"enabled: false");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/lib/order.jar!/com/acme/OrderService.class
+      with: "{}"
+  - replace-entry:
+      target: BOOT-INF/lib/order.jar!/com/acme/config/order.yml
+      with: "{}"
+"#,
+                class_replacement.display(),
+                config_replacement.display()
+            ),
+        )
+        .unwrap();
+
+        apply_patch_plan(&jar, &plan, &output).unwrap();
+
+        assert_eq!(
+            read_nested_jar_entry(
+                &output,
+                "BOOT-INF/lib/order.jar",
+                "com/acme/OrderService.class"
+            ),
+            b"patched-class-bytes"
+        );
+        assert_eq!(
+            read_nested_jar_entry(
+                &output,
+                "BOOT-INF/lib/order.jar",
+                "com/acme/config/order.yml"
+            ),
+            b"enabled: false"
+        );
+    }
+
+    #[test]
+    fn apply_fails_for_missing_nested_jar() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("OrderService.class");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        write_input_file(&replacement, b"patched-class-bytes");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/lib/missing.jar!/com/acme/OrderService.class
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        let err = apply_patch_plan(&jar, &plan, &output).unwrap_err();
+
+        assert!(
+            matches!(err, ApplyError::MissingNestedJar(target) if target == "BOOT-INF/lib/missing.jar")
+        );
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn apply_fails_for_missing_nested_target() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("Missing.class");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        write_input_file(&replacement, b"patched-class-bytes");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/lib/order.jar!/com/acme/Missing.class
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        let err = apply_patch_plan(&jar, &plan, &output).unwrap_err();
 
         assert!(matches!(
             err,
-            ApplyError::UnsupportedNestedTarget(target)
-                if target == "BOOT-INF/lib/order.jar!/com/acme/OrderService.class"
+            ApplyError::MissingNestedTarget {
+                outer_jar,
+                inner_path
+            } if outer_jar == "BOOT-INF/lib/order.jar" && inner_path == "com/acme/Missing.class"
         ));
+        assert!(!output.exists());
     }
 
     #[test]
