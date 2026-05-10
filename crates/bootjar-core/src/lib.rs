@@ -224,6 +224,10 @@ pub enum ApplyError {
         outer_jar: String,
         source: ZipError,
     },
+    InvalidReplacementNestedJar {
+        path: PathBuf,
+        source: ZipError,
+    },
     DuplicateTarget(String),
 }
 
@@ -276,6 +280,13 @@ impl fmt::Display for ApplyError {
             }
             Self::InvalidNestedJar { outer_jar, source } => {
                 write!(f, "nested jar is not readable {outer_jar}: {source}")
+            }
+            Self::InvalidReplacementNestedJar { path, source } => {
+                write!(
+                    f,
+                    "replacement nested jar could not be read {}: {source}",
+                    path.display()
+                )
             }
             Self::DuplicateTarget(target) => {
                 write!(f, "duplicate replace target in patch plan: {target}")
@@ -426,6 +437,7 @@ struct RawReplaceEntry {
 #[derive(Debug)]
 struct ResolvedReplacement {
     target: ArchivePath,
+    source: PathBuf,
     bytes: Vec<u8>,
 }
 
@@ -890,7 +902,11 @@ fn resolve_replacements(plan: &PatchPlan) -> Result<Vec<ResolvedReplacement>, Ap
                 target: operation.target.clone(),
                 source,
             })?;
-        replacements.push(ResolvedReplacement { target, bytes });
+        replacements.push(ResolvedReplacement {
+            target,
+            source: operation.source.clone(),
+            bytes,
+        });
     }
     Ok(replacements)
 }
@@ -980,11 +996,17 @@ fn rewrite_outer_jar_with_plan(
     for replacement in resolved {
         match replacement.target {
             ArchivePath::Outer { path } => {
+                let compression_method = if nested_jar_entry(&path).is_some() {
+                    validate_replacement_nested_jar(&replacement.source, &replacement.bytes)?;
+                    Some(CompressionMethod::Stored)
+                } else {
+                    None
+                };
                 outer_replacements.insert(
                     path,
                     ReplacementBytes {
                         bytes: replacement.bytes,
-                        compression_method: None,
+                        compression_method,
                     },
                 );
             }
@@ -1022,6 +1044,16 @@ fn rewrite_outer_jar_with_plan(
     }
 
     rewrite_outer_jar_with_replacements(input_jar, output_jar, outer_replacements)
+}
+
+fn validate_replacement_nested_jar(path: &Path, bytes: &[u8]) -> Result<(), ApplyError> {
+    let cursor = Cursor::new(bytes);
+    zip::ZipArchive::new(cursor).map(|_| ()).map_err(|source| {
+        ApplyError::InvalidReplacementNestedJar {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
 }
 
 fn read_entry_bytes_by_path<R: Read + Seek>(
@@ -1951,6 +1983,87 @@ operations:
             ),
             b"enabled: false"
         );
+    }
+
+    #[test]
+    fn apply_replaces_whole_nested_jar_and_stores_outer_entry() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("order-replacement.jar");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        let replacement_bytes = nested_jar_bytes(&[(
+            "com/acme/NewOrderService.class",
+            CompressionMethod::Deflated,
+            b"new-class-bytes",
+        )]);
+        write_input_file(&replacement, &replacement_bytes);
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/lib/order.jar
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        apply_patch_plan(&jar, &plan, &output).unwrap();
+
+        assert_eq!(
+            read_jar_entry(&output, "BOOT-INF/lib/order.jar"),
+            replacement_bytes
+        );
+        assert_eq!(
+            jar_entry_compression(&output, "BOOT-INF/lib/order.jar"),
+            CompressionMethod::Stored
+        );
+        assert_eq!(
+            read_nested_jar_entry(
+                &output,
+                "BOOT-INF/lib/order.jar",
+                "com/acme/NewOrderService.class"
+            ),
+            b"new-class-bytes"
+        );
+    }
+
+    #[test]
+    fn apply_rejects_invalid_whole_nested_jar_replacement() {
+        let jar = spring_boot_fixture_with_nested_entries();
+        let dir = tempdir().unwrap();
+        let replacement = dir.path().join("not-a-jar.bin");
+        let plan = dir.path().join("patch-plan.yaml");
+        let output = dir.path().join("patched.jar");
+        write_input_file(&replacement, b"not a jar");
+        std::fs::write(
+            &plan,
+            format!(
+                r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/lib/order.jar
+      with: "{}"
+"#,
+                replacement.display()
+            ),
+        )
+        .unwrap();
+
+        let err = apply_patch_plan(&jar, &plan, &output).unwrap_err();
+
+        assert!(
+            matches!(err, ApplyError::InvalidReplacementNestedJar { path, .. } if path == replacement)
+        );
+        assert!(!output.exists());
     }
 
     #[test]

@@ -103,6 +103,13 @@ fn read_nested_jar_entry(path: &std::path::Path, nested_jar: &str, inner_path: &
     bytes
 }
 
+fn jar_entry_compression(path: &std::path::Path, entry_name: &str) -> CompressionMethod {
+    let file = std::fs::File::open(path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let entry = archive.by_name(entry_name).unwrap();
+    entry.compression()
+}
+
 #[test]
 fn inspect_reports_spring_boot_layout() {
     let jar = spring_boot_jar();
@@ -418,6 +425,56 @@ operations:
             "com/acme/OrderService.class"
         ),
         b"patched-class-bytes"
+    );
+}
+
+#[test]
+fn apply_replaces_whole_nested_jar() {
+    let jar = spring_boot_jar();
+    let dir = tempdir().unwrap();
+    let replacement = dir.path().join("order-replacement.jar");
+    let plan = dir.path().join("patch-plan.yaml");
+    let output_jar = dir.path().join("app-patched.jar");
+    let replacement_bytes = nested_jar_bytes(&[(
+        "com/acme/NewOrderService.class",
+        CompressionMethod::Deflated,
+        b"new-class-bytes",
+    )]);
+    write_input_file(&replacement, &replacement_bytes);
+    std::fs::write(
+        &plan,
+        format!(
+            r#"
+kind: patch-plan
+version: 1
+operations:
+  - replace-entry:
+      target: BOOT-INF/lib/order.jar
+      with: "{}"
+"#,
+            replacement.display()
+        ),
+    )
+    .unwrap();
+
+    let output = command(&[
+        "apply",
+        "--jar",
+        jar.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+        "--out",
+        output_jar.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        read_jar_entry(&output_jar, "BOOT-INF/lib/order.jar"),
+        replacement_bytes
+    );
+    assert_eq!(
+        jar_entry_compression(&output_jar, "BOOT-INF/lib/order.jar"),
+        CompressionMethod::Stored
     );
 }
 
